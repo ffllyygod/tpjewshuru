@@ -1,0 +1,8 @@
+# Force the Python provider explicitly. Without this, Nixpacks
+# auto-detection picks Node instead of Python whenever a root-level
+# package.json is present (e.g. the one under .railway/ for Railway's own
+# CLI tooling, or a stray one at repo root) — it silently builds `npm ci`
+# as the install step instead of `pip install -r requirements.txt`, and the
+# deploy then crashes with "uvicorn: command not found" because uvicorn was
+# never installed. See JOURNAL.md.
+providers = ["python"]

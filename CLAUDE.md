@@ -22,17 +22,30 @@ happened. After every important change, append an entry to `JOURNAL.md`
 ## Local setup
 
 ```
-docker compose up -d                        # Postgres+pgvector on :5433
+docker compose up -d                        # Postgres+pgvector (:5433) + SuperTokens core (:3567)
 python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
 cp .env.example .env                        # fill in DATABASE_URL (default is fine)
 .venv/Scripts/python scripts/seed_db.py --reset
 .venv/Scripts/python scripts/add_demo_user.py   # adds Arun + 2 orders for live demo
 # get a free API key at openrouter.ai, put it in .env as LLM_API_KEY
+# fill in SMTP_* in .env (Gmail + an App Password — see .env.example) for OTP login
 .venv/Scripts/uvicorn src.api.main:app --reload --port 8000
 
 # separate terminal — frontend
 cd web && npm install && npm run dev        # http://localhost:3000
 ```
+
+**Auth**: self-hosted SuperTokens (Passwordless/OTP-over-email), mounted at
+`/auth` — `POST /auth/signinup/code` {email} sends a code (only to emails
+already in `customers`, silently, to avoid enumeration), `POST
+/auth/signinup/code/consume` verifies it and returns session tokens as
+response headers (`st-access-token`/`st-refresh-token` — header-based
+sessions, not cookies, since frontend/backend are on different domains).
+Send the access token back as `Authorization: Bearer <token>` on
+`/conversations` and `/chat`. `POST /conversations` no longer accepts a
+client-supplied `email` — identity comes only from a verified session, or
+the conversation stays anonymous. See `JOURNAL.md`'s "real auth" entry for
+the full story, including a debugging saga that turned out not to be a bug.
 
 Model backend is OpenRouter hosting `openai/gpt-4o-mini` (OpenAI-compatible
 API) — no local model/GPU needed, ~5-8s/turn. Any OpenAI-compatible provider
@@ -72,7 +85,8 @@ applying a coupon/SIP discount), `knowledge_tools.py` (Postgres full-text
 search over policy docs), `market_tools.py` (live gold/silver rates),
 `formatting.py` (INR currency formatting — see Guardrails below).
 `src/api/main.py` is the thin FastAPI surface the web app talks to
-(`POST /conversations`, `POST /chat`).
+(`POST /conversations`, `POST /chat`); `src/api/auth.py` wires in self-hosted
+SuperTokens for real OTP-over-email login (see Local setup below).
 
 ## Guardrails — the load-bearing design decisions
 

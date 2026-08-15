@@ -1,40 +1,56 @@
 """Minimal FastAPI surface for the chatbot brain.
 
 Two endpoints:
-  POST /conversations  -> start a session, resolve identity by email
+  POST /conversations  -> start a session, identity from a verified SuperTokens
+                           session if present, anonymous otherwise
   POST /chat            -> send a message, get the assistant's reply
 
-This is deliberately thin — it's the contract the web app talks to. Auth in
-this demo is "email exists in customers table"; swap _resolve_identity for
-real session auth later without touching the agent loop.
+Auth: self-hosted SuperTokens (Passwordless/OTP-over-email), mounted at
+/auth by its own middleware — see src/api/auth.py for the full rationale.
+customer_id is NEVER taken from a client-supplied field; it's always
+resolved fresh from a verified session. This is the same "identity from a
+verified source only" principle already used throughout src/tools/, now
+applied at the HTTP boundary instead of just inside tool calls.
 """
 
 from __future__ import annotations
 
+import os
 import uuid
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg.rows import dict_row
 from pydantic import BaseModel
+from supertokens_python import get_all_cors_headers
+from supertokens_python.framework.fastapi import get_middleware
+from supertokens_python.recipe.session import SessionContainer
+from supertokens_python.recipe.session.framework.fastapi import verify_session
 
 from src.agent.orchestrator import run_turn
+from src.api.auth import init_auth, resolve_customer_id_from_session
 from src.db.connection import get_conn
-from src.tools.account_tools import get_customer_by_email
+
+init_auth()
 
 app = FastAPI(title="TP Jewellers Chatbot")
 
-# Wide-open CORS for demo purposes — tighten before anything real.
+app.add_middleware(get_middleware())
+
+# Real origins now instead of a wildcard — tightened alongside real auth
+# (see JOURNAL.md). Header-based sessions (not cookies), so allow_credentials
+# isn't needed; SuperTokens manages Access-Control-Expose-Headers itself for
+# its own response headers.
+_allowed_origins = [
+    os.environ.get("WEBSITE_DOMAIN", "http://localhost:3000"),
+    "http://localhost:3000",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=list(set(_allowed_origins)),
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"] + get_all_cors_headers(),
 )
-
-
-class StartConversationRequest(BaseModel):
-    email: str | None = None  # None = anonymous browsing (knowledge questions only)
 
 
 class StartConversationResponse(BaseModel):
@@ -58,34 +74,47 @@ def health():
 
 
 @app.post("/conversations", response_model=StartConversationResponse)
-def start_conversation(req: StartConversationRequest):
-    customer = get_customer_by_email(req.email) if req.email else None
-    if req.email and not customer:
-        raise HTTPException(status_code=404, detail="No customer found for that email.")
+def start_conversation(session: SessionContainer | None = Depends(verify_session(session_required=False))):
+    customer_id = resolve_customer_id_from_session(session)
+
+    customer_name = None
+    if customer_id:
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT name FROM customers WHERE id = %s", (customer_id,))
+            row = cur.fetchone()
+            customer_name = row["name"] if row else None
 
     conv_id = str(uuid.uuid4())
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO conversations (id, customer_id) VALUES (%s, %s)",
-            (conv_id, customer["id"] if customer else None),
+            (conv_id, customer_id),
         )
         conn.commit()
 
     return StartConversationResponse(
         conversation_id=conv_id,
-        customer_id=str(customer["id"]) if customer else None,
-        customer_name=customer["name"] if customer else None,
+        customer_id=customer_id,
+        customer_name=customer_name,
     )
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+def chat(req: ChatRequest, session: SessionContainer | None = Depends(verify_session(session_required=False))):
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT customer_id FROM conversations WHERE id = %s", (req.conversation_id,))
         conv = cur.fetchone()
     if not conv:
         raise HTTPException(status_code=404, detail="Unknown conversation_id.")
 
-    customer_id = str(conv["customer_id"]) if conv["customer_id"] else None
-    reply = run_turn(req.conversation_id, customer_id, req.message)
+    conv_customer_id = str(conv["customer_id"]) if conv["customer_id"] else None
+    session_customer_id = resolve_customer_id_from_session(session)
+
+    # A customer-owned conversation requires the caller's verified session to
+    # resolve to that SAME customer — closes the "guess someone else's
+    # conversation_id" gap. Anonymous conversations need no session, unchanged.
+    if conv_customer_id is not None and conv_customer_id != session_customer_id:
+        raise HTTPException(status_code=403, detail="This conversation belongs to a different customer.")
+
+    reply = run_turn(req.conversation_id, conv_customer_id, req.message)
     return ChatResponse(reply=reply)

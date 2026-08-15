@@ -3,7 +3,7 @@
 import { useState } from "react";
 import LoginScreen from "@/components/LoginScreen";
 import ChatWindow from "@/components/ChatWindow";
-import { ApiError, startConversation } from "@/lib/api";
+import { startConversation } from "@/lib/api";
 
 type Session = {
   conversationId: string;
@@ -15,25 +15,44 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function handleStart(email: string | null) {
+  // Called once we already have a verified SuperTokens session (token is in
+  // sessionStorage — see src/lib/api.ts) or the customer chose to browse
+  // anonymously. Either way, /conversations resolves identity itself from
+  // whatever session header is attached — never from anything the client
+  // asserts directly.
+  async function startWithCurrentSession() {
     setLoading(true);
     setError(null);
     try {
-      const res = await startConversation(email);
+      const res = await startConversation();
       setSession({ conversationId: res.conversation_id, customerName: res.customer_name });
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 404) {
-        setError("No customer found with that email — try arun@shurutech.com, or leave it blank.");
-      } else {
-        setError("Couldn't reach the API. Is it running on localhost:8000?");
-      }
+    } catch {
+      setError("Couldn't reach the API. Is it running on localhost:8000?");
     } finally {
       setLoading(false);
     }
   }
 
   if (!session) {
-    return <LoginScreen onStart={handleStart} loading={loading} error={error} />;
+    return (
+      <LoginScreen onLoggedIn={startWithCurrentSession} onBrowseAnonymously={startWithCurrentSession} />
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="flex flex-1 items-center justify-center px-4">
+        <p className="text-sm text-[var(--color-fg-muted)]">Connecting…</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-1 items-center justify-center px-4">
+        <p className="text-sm text-red-400">{error}</p>
+      </div>
+    );
   }
 
   return <ChatWindow conversationId={session.conversationId} customerName={session.customerName} />;

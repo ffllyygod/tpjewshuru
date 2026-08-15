@@ -9,11 +9,30 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     volumes:
       - tpjewellers_postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-supertokens-db.sql:/docker-entrypoint-initdb.d/init-supertokens-db.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # SuperTokens core — self-hosted, open-source auth engine (Passwordless/OTP
+  # recipe). Uses its own database ("supertokens", created above) on the same
+  # Postgres server — isolated from our app tables, no second DB instance.
+  supertokens:
+    image: supertokens/supertokens-postgresql:latest
+    ports:
+      - "${SUPERTOKENS_PORT:-3567}:3567"
+    environment:
+      POSTGRESQL_CONNECTION_URI: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/supertokens
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3567/hello"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   tpjewellers_postgres_data:

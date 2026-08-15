@@ -6,3 +6,10 @@ __pycache__/
 web/node_modules/
 web/.next/
 .git/
+
+# Node artifacts for the Railway CLI declarative-config tool only (see
+# .railway/README.md) — not part of the Python app, must not reach the
+# Nixpacks build context (confuses provider auto-detection, see nixpacks.toml).
+node_modules/
+package.json
+package-lock.json

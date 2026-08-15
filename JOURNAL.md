@@ -6,6 +6,72 @@ debugging this at 2am, and interview-me explaining design choices out loud.
 
 ---
 
+## 2026-08-15 (real auth) — Real authentication: SuperTokens + Gmail SMTP, and a debugging story with a twist ending
+
+**The gap this closes**: `POST /conversations {email}` used to trust a
+client-supplied email with zero verification — anyone who knew/guessed a
+customer's email could act as them, undermining every ownership guardrail
+built earlier (coupon settlement, Gold SIP, cancellation). Fixed with
+**SuperTokens** (self-hosted, Apache-licensed, Passwordless/OTP-over-email
+recipe) instead of hand-rolling OTP crypto — per explicit steer to use a
+real, open-source, battle-tested auth engine rather than reinventing it.
+
+**Architecture**: SuperTokens core runs as its own service (Docker locally,
+a separate Railway service in prod) with its **own** `supertokens` database
+on the same Postgres server as the app DB — isolated schema, no second
+Postgres instance. `src/api/auth.py` wires `supertokens-python` into FastAPI.
+Sessions are **header-based, not cookies** — frontend (`vercel.app`) and
+backend (`railway.app`) are different domains, and third-party-cookie
+browser restrictions make cross-domain cookie sessions unreliable;
+`get_token_transfer_method` returns `"header"` to sidestep that. We never
+store a SuperTokens user ID in our schema — `resolve_customer_id_from_session`
+always looks up `customers WHERE email = <verified email>` fresh, keeping
+our schema fully decoupled from SuperTokens' internal user model.
+
+**Anti-enumeration gate**: `create_code_post` is overridden to check our own
+`customers` table before letting SuperTokens create/send a real code. An
+unknown email still gets a normal-looking 200 response (so the API never
+reveals whether an email belongs to a real customer) but with placeholder
+`uuid.uuid4()` IDs that fail to consume later, and no real SMTP send is
+wasted on it.
+
+**The debugging story**: after wiring everything up, OTP emails weren't
+arriving. Spent a long stretch chasing this as an SDK/SMTP bug — verified
+credentials worked via raw `smtplib` (email received), verified the
+initialized `SMTPService.send_email()` succeeded in isolation, verified the
+live server returned clean 200 OKs with no exceptions logged. Every layer
+checked out "working" and yet no email showed up for the address under test
+(`abad.1@iitj.ac.in`, the Gmail account used for *sending*).
+
+**The actual bug: there wasn't one.** `abad.1@iitj.ac.in` was never seeded
+as a customer — the anti-enumeration gate was correctly, silently declining
+to send it a real code, exactly as designed. The real tell I missed for too
+long: **both the real and placeholder response paths return a
+`uuid.uuid4()`-shaped ID**, so "the response has real-looking IDs" is not
+evidence the placeholder branch was skipped — SuperTokens' own IDs for a
+*genuine* flow are base64-style tokens (e.g. `1zvae90UKNwZa8XagK6cFyyAh...`),
+visually distinct from a `uuid.uuid4()` string once you put them side by
+side. Confirmed by testing against `arun@shurutech.com` (an actual seeded
+customer) instead: email delivered, code arrived, consumed successfully, full
+session issued. Lesson: when a guardrail is *doing its job*, it looks
+identical to a bug from the outside — check the precondition (is this email
+even a real customer?) before assuming the mechanism is broken.
+
+**Verified end-to-end**: OTP delivery → code consumption → session issuance
+→ `/conversations` resolves the real customer → `/chat` on that customer's
+conversation succeeds → `/chat` on the same conversation *without* a session
+is rejected with 403 → anonymous conversations still work with no session at
+all. 10 new unit tests in `tests/test_auth.py` cover the customer-existence
+gate and the ownership check with fakes (no live SuperTokens instance
+needed for these); full suite (53 tests) passes clean after a DB reset.
+
+**Not yet done**: frontend login UI, Railway deployment of the SuperTokens
+service + prod SMTP env vars, live verification against the deployed
+frontend. `docker-compose.yml` and `.env.example` are updated for local dev;
+`requirements.txt` now pins `supertokens-python>=0.31.3`.
+
+---
+
 ## 2026-08-15 (deployed, continued) — Attaching the Postgres volume: three real problems, in sequence
 
 The `railway volume add` CLI command panics (`Option::unwrap() on a None
