@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+:root {
+  --color-bg: #0f0d0a;
+  --color-bg-elevated: #17140f;
+  --color-fg: #f2ede3;
+  --color-fg-muted: #a89f8f;
+  --color-gold: #c9a15a;
+  --color-gold-soft: #e2c98a;
+  --color-border: #2a2519;
+  --color-user-bubble: #c9a15a;
+  --color-user-bubble-fg: #14110a;
+  --color-bot-bubble: #1e1a12;
+}
+
+@theme inline {
+  --font-display: var(--font-display);
+  --font-body: var(--font-body);
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-body), ui-sans-serif, system-ui, sans-serif;
+}
+
+.font-display {
+  font-family: var(--font-display), serif;
+}
+
+@keyframes typing-dot {
+  0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
+
+.typing-dot {
+  animation: typing-dot 1.2s infinite ease-in-out;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
