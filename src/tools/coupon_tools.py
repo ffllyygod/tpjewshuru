@@ -220,7 +220,7 @@ def request_cash_refund(customer_id: str, order_number: str) -> dict:
         if order["status"] not in SETTLEMENT_SOURCE_STATUSES:
             return {"error": "not_settleable", "message": f"Order is {order['status']} — not eligible for a refund."}
 
-        cur.execute("UPDATE orders SET payment_status = 'refund_pending' WHERE id = %s", (order["id"],))
+        cur.execute("UPDATE orders SET payment_status = 'REFUND_PENDING' WHERE id = %s", (order["id"],))
         cur.execute(
             "INSERT INTO order_status_history (order_id, from_status, to_status, reason) VALUES (%s, %s, %s, 'cash_refund_requested')",
             (order["id"], order["status"], order["status"]),
