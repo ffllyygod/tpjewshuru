@@ -198,7 +198,7 @@ CREATE INDEX IF NOT EXISTS orders_return_reason_idx
 """
 
 
-def backfill_and_constrain_reasons(conn: psycopg.Connection) -> str:
+def backfill_and_constrain_reasons(conn: psycopg.Connection, defer_constraints: bool = False) -> str:
     """Backfill already-resolved orders, THEN add the constraints.
 
     Ordering is load-bearing, the same trap as the payment_status step above: a
@@ -245,6 +245,12 @@ def backfill_and_constrain_reasons(conn: psycopg.Connection) -> str:
         )
         if cur.fetchone()[0]:
             return f"already current (backfilled {backfilled_cancel}+{backfilled_return})"
+
+        if defer_constraints:
+            return (
+                f"columns ready, CONSTRAINTS DEFERRED; backfilled "
+                f"{backfilled_cancel} cancelled / {backfilled_return} returned"
+            )
         cur.execute(_REASON_CONSTRAINTS)
     conn.commit()
     return f"constraints added; backfilled {backfilled_cancel} cancelled / {backfilled_return} returned"
@@ -298,6 +304,16 @@ def relax_coupon_source_constraint(conn: psycopg.Connection) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", help="target database URL (defaults to $DATABASE_URL)")
+    parser.add_argument(
+        "--defer-constraints",
+        action="store_true",
+        help=(
+            "Add the columns but NOT the 'a resolved order must carry a reason' CHECKs. "
+            "Use this when the currently-deployed code predates reason codes: it writes "
+            "cancellations without one, and would start failing the moment the CHECK exists. "
+            "Deploy the new code, then re-run this script without the flag."
+        ),
+    )
     args = parser.parse_args()
 
     load_dotenv(ROOT / ".env")
@@ -317,7 +333,7 @@ def main() -> None:
             conn.commit()
             print(f"  ok  {description}")
         print(f"  ok  coupons source constraint — {relax_coupon_source_constraint(conn)}")
-        print(f"  ok  resolution reasons — {backfill_and_constrain_reasons(conn)}")
+        print(f"  ok  resolution reasons — {backfill_and_constrain_reasons(conn, args.defer_constraints)}")
 
     print("\nDone. Every step is idempotent; re-running changes nothing.")
 

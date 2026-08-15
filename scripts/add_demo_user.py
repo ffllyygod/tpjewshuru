@@ -104,7 +104,19 @@ def insert_order(conn: psycopg.Connection, customer_id: str, order_number: str, 
             INSERT INTO orders (order_number, customer_id, status, placed_at, shipped_at, delivered_at,
                                  total_amount_cents, shipping_address, payment_status)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'PAID')
-            ON CONFLICT (order_number) DO UPDATE SET status = EXCLUDED.status
+            ON CONFLICT (order_number) DO UPDATE SET
+              status = EXCLUDED.status,
+              delivered_at = EXCLUDED.delivered_at,
+              -- Reset the resolution columns too. Without this, re-running after
+              -- someone has demoed a cancellation or return leaves a stale
+              -- reason on an order being put back to PLACED/DELIVERED, which
+              -- violates the "only a resolved order carries a reason" CHECK and
+              -- makes the script fail on its second run.
+              cancellation_reason_code = NULL,
+              cancellation_reason_note = NULL,
+              return_reason_code = NULL,
+              return_reason_note = NULL,
+              returned_at = NULL
             RETURNING id
             """,
             (
@@ -157,6 +169,12 @@ def main():
         print("Orders:")
         insert_order(conn, customer_id, "TPJ-DEMO01", "PLACED", placed_hours_ago=3, product=products[0], size="7")
         insert_order(conn, customer_id, "TPJ-DEMO02", "SHIPPED", placed_hours_ago=72, product=products[1])
+        # Delivered 6 days ago (placed 10, delivered +4), so it sits inside the
+        # 30-day return window. Without a DELIVERED order there is nothing on
+        # this account the return flow can be demonstrated against at all —
+        # PLACED and SHIPPED orders are cancellation territory.
+        insert_order(conn, customer_id, "TPJ-DEMO03", "DELIVERED", placed_hours_ago=24 * 10,
+                     product=products[0], size="7")
 
     print("\nDone. Log in as this user with OTP-over-email: enter " + DEMO_EMAIL
           + " on the web login screen (or POST /auth/signinup/code {\"email\": ...},"
