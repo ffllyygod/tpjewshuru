@@ -6,6 +6,38 @@ debugging this at 2am, and interview-me explaining design choices out loud.
 
 ---
 
+## 2026-08-15 (deployed) — Live on Railway + Vercel
+
+Deployed the `gold-sip-schemes` branch's exact content (not merged into `main`
+yet — deploying the most complete branch on request, main/branch merge is a
+separate decision).
+
+- **Postgres**: Railway service running the exact `pgvector/pgvector:pg16`
+  image used locally (not Railway's default Postgres template, which doesn't
+  include pgvector) — via `railway add --image`. Schema + all seed data
+  (products, coupon policy, Gold SIP plan tiers, demo user) applied directly
+  from this machine using the service's public TCP proxy
+  (`railway tcp-proxy create`), then the backend talks to it over Railway's
+  private network (`postgres.railway.internal`) instead.
+- **Backend**: FastAPI as a normal long-running Railway service (not
+  serverless — deliberately avoided Vercel for this half, since our
+  module-level `psycopg_pool` connection pool doesn't suit a spin-up/spin-down
+  serverless model). `railway.json` pins the start command explicitly
+  (`uvicorn ... --port $PORT`) rather than relying on Nixpacks' Procfile
+  detection alone. `.railwayignore` excludes `.venv`/`web/node_modules` so the
+  upload doesn't ship local build artifacts.
+- **Frontend**: Next.js on Vercel, `NEXT_PUBLIC_API_BASE` set to the Railway
+  backend's public domain via `vercel env add`.
+- Live-verified: real chat request from the deployed Vercel origin to the
+  deployed Railway backend, correct CORS headers, correct response.
+
+**Known follow-up, not yet done**: the Postgres service has no persistent
+volume attached — `railway volume add` crashed with a Rust panic
+(`Option::unwrap() on a None value`) in this CLI version, a real bug in the
+tool, not a config mistake. Data currently lives on the container's ephemeral
+disk; needs the volume attached via the Railway dashboard (30-second manual
+step) before this is safe against a redeploy wiping the DB.
+
 ## 2026-08-15 (branch: gold-sip-schemes) — Gold SIP schemes, and three real LLM-reliability bugs
 
 **Branched off `coupon-redeem-system`, not `main`** — the plan initially said "off main"
