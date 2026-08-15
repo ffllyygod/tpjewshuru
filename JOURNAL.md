@@ -6,6 +6,37 @@ debugging this at 2am, and interview-me explaining design choices out loud.
 
 ---
 
+## 2026-08-15 (frontend) — Making the two personas visible
+
+Merged `admin-persona` to `main` and made the web app role-aware. Small diff,
+one decision worth recording.
+
+**How a staff member picks a persona.** Role is only knowable from a real
+`/conversations` response — there's no "who am I" endpoint, and adding one just
+to shape the UI would be a second place identity gets decided. So an admin
+always opens a *customer* conversation first, and if the response comes back
+`role: "admin"` they're offered the choice (`ModeChooser`). Picking the staff
+console starts a second conversation and abandons the first as an empty row.
+That waste is deliberate: the alternative endpoint would exist purely for
+presentation, and the server would still have to re-verify the role on every
+turn regardless.
+
+Making the choice explicit at the start is also what keeps "cancel my order"
+unambiguous. Staff have two genuinely different jobs and the tool sets are
+disjoint, so this is a decision the UI should take rather than something the
+model infers from phrasing.
+
+Everything the client does with `role`/`mode` is presentation only — the pill,
+the suggestions, the placeholder. A tampered client gets 403s, not data.
+
+**Fixed while here:** the customer suggestion chip read "Show me rings under
+**$3000**". The store prices everything in rupees, and the backend has an entire
+formatting convention devoted to getting that right (`_display` fields, Indian
+digit grouping, three production bugs). The very first thing the UI offered to
+say handed the model a dollar sign.
+
+---
+
 ## 2026-08-15 (admin writes) — Operational writes, and why the token grew a `params` column
 
 The admin persona could read the whole business but change none of it. This

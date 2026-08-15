@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { sendChatMessage } from "@/lib/api";
+import { sendChatMessage, type Mode } from "@/lib/api";
 import Markdown from "@/components/Markdown";
 
 export type ChatMessage = {
@@ -13,23 +13,37 @@ export type ChatMessage = {
 type Props = {
   conversationId: string;
   customerName: string | null;
+  mode: Mode;
 };
 
 const SUGGESTIONS = [
   "What are my orders?",
   "Cancel my most recent order",
-  "Show me rings under $3000",
+  // Was "$3000" — the store prices everything in rupees, and the backend has a
+  // whole formatting convention devoted to that. Handing the model a dollar sign
+  // in the very first message was the one place the UI contradicted it.
+  "Show me rings under ₹30,000",
   "What's your cancellation policy?",
 ];
 
-export default function ChatWindow({ conversationId, customerName }: Props) {
+const ADMIN_SUGGESTIONS = [
+  "How were sales last month?",
+  "What's running low on stock?",
+  "Break down revenue by category this year",
+  "Who are our top customers?",
+];
+
+export default function ChatWindow({ conversationId, customerName, mode }: Props) {
+  const isAdmin = mode === "admin";
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "welcome",
       role: "assistant",
-      content: customerName
-        ? `Hi ${customerName.split(" ")[0]}, welcome back. How can I help — orders, cancellations, or finding something new?`
-        : "Hi! I can help with product recommendations and store policies. Log in with your email to ask about your own orders.",
+      content: isAdmin
+        ? `Staff console${customerName ? ` — signed in as ${customerName.split(" ")[0]}` : ""}. Ask about sales, inventory, orders or customers across the whole business. Changes are previewed before anything is applied.`
+        : customerName
+          ? `Hi ${customerName.split(" ")[0]}, welcome back. How can I help — orders, cancellations, or finding something new?`
+          : "Hi! I can help with product recommendations and store policies. Log in with your email to ask about your own orders.",
     },
   ]);
   const [input, setInput] = useState("");
@@ -62,11 +76,22 @@ export default function ChatWindow({ conversationId, customerName }: Props) {
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      <header className="border-b border-[var(--color-border)] px-6 py-4">
-        <p className="text-xs tracking-[0.3em] text-[var(--color-gold)] uppercase">
-          TP Jewellers
-        </p>
-        <h1 className="font-display text-xl text-[var(--color-fg)]">Concierge</h1>
+      <header className="flex items-center justify-between border-b border-[var(--color-border)] px-6 py-4">
+        <div>
+          <p className="text-xs tracking-[0.3em] text-[var(--color-gold)] uppercase">
+            TP Jewellers
+          </p>
+          <h1 className="font-display text-xl text-[var(--color-fg)]">
+            {isAdmin ? "Staff Console" : "Concierge"}
+          </h1>
+        </div>
+        {/* Cosmetic, but load-bearing for the person using it: staff can see any
+            customer's data here, and that should never be ambiguous on screen. */}
+        {isAdmin && (
+          <span className="rounded-full border border-[var(--color-gold)] px-3 py-1 text-[10px] font-medium tracking-[0.2em] text-[var(--color-gold)] uppercase">
+            Staff
+          </span>
+        )}
       </header>
 
       <div className="flex-1 overflow-y-auto px-4 py-6 sm:px-8">
@@ -84,7 +109,7 @@ export default function ChatWindow({ conversationId, customerName }: Props) {
 
       {messages.length <= 1 && (
         <div className="mx-auto mb-3 flex max-w-2xl flex-wrap gap-2 px-4 sm:px-8">
-          {SUGGESTIONS.map((s) => (
+          {(isAdmin ? ADMIN_SUGGESTIONS : SUGGESTIONS).map((s) => (
             <button
               key={s}
               onClick={() => send(s)}
@@ -107,7 +132,11 @@ export default function ChatWindow({ conversationId, customerName }: Props) {
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask about an order, or find your next piece…"
+            placeholder={
+              isAdmin
+                ? "Ask about sales, stock, orders or customers…"
+                : "Ask about an order, or find your next piece…"
+            }
             className="flex-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-4 py-2.5 text-sm text-[var(--color-fg)] outline-none focus:border-[var(--color-gold)]"
           />
           <button

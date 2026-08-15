@@ -24,10 +24,20 @@ function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+// `role` is what the server resolved this session to be — never what the client
+// claimed. `mode` is what the conversation actually opened as, which can only be
+// "admin" if role is too. The client shows or hides staff affordances based on
+// these, but that is presentation only: the backend re-verifies the role against
+// the session on every single turn, so a tampered client gets 403s, not data.
+export type Role = "anonymous" | "customer" | "admin";
+export type Mode = "customer" | "admin";
+
 export type StartConversationResponse = {
   conversation_id: string;
   customer_id: string | null;
   customer_name: string | null;
+  role: Role;
+  mode: Mode;
 };
 
 export class ApiError extends Error {
@@ -46,10 +56,13 @@ async function handle<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export function startConversation(): Promise<StartConversationResponse> {
+// Requesting mode="admin" is a request, not an assertion: the server 403s unless
+// the verified session actually resolves to a staff account.
+export function startConversation(mode: Mode = "customer"): Promise<StartConversationResponse> {
   return fetch(`${API_BASE}/conversations`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ mode }),
   }).then((r) => handle<StartConversationResponse>(r));
 }
 
