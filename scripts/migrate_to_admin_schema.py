@@ -131,7 +131,123 @@ STEPS: list[tuple[str, str]] = [
         CREATE INDEX IF NOT EXISTS order_items_product_id_idx ON order_items(product_id);
         """,
     ),
+    (
+        "products.returnable — final-sale flag",
+        """
+        ALTER TABLE products
+          ADD COLUMN IF NOT EXISTS returnable BOOLEAN NOT NULL DEFAULT true;
+        """,
+    ),
+    (
+        "resolution_reasons — the cancellation/return pick-list",
+        """
+        CREATE TABLE IF NOT EXISTS resolution_reasons (
+          code           TEXT PRIMARY KEY,
+          kind           TEXT NOT NULL CHECK (kind IN ('cancellation', 'return')),
+          label          TEXT NOT NULL,
+          applies_to     TEXT NOT NULL DEFAULT 'both' CHECK (applies_to IN ('customer', 'staff', 'both')),
+          requires_note  BOOLEAN NOT NULL DEFAULT false,
+          active         BOOLEAN NOT NULL DEFAULT true,
+          sort_order     INT NOT NULL DEFAULT 100
+        );
+        """,
+    ),
+    (
+        "orders — resolution reason columns",
+        """
+        ALTER TABLE orders
+          ADD COLUMN IF NOT EXISTS cancellation_reason_code TEXT,
+          ADD COLUMN IF NOT EXISTS cancellation_reason_note TEXT,
+          ADD COLUMN IF NOT EXISTS return_reason_code       TEXT,
+          ADD COLUMN IF NOT EXISTS return_reason_note       TEXT,
+          ADD COLUMN IF NOT EXISTS returned_at              TIMESTAMPTZ;
+        """,
+    ),
 ]
+
+# Reason rows the migration must guarantee exist before the FKs and CHECKs are
+# added. Deliberately only the two inactive legacy codes: the real pick-list is
+# seeded by seed_db.seed_resolution_reasons / add_admin_users-style scripts, but
+# these two are load-bearing for the constraints below and so belong here.
+_LEGACY_REASON_ROWS = [
+    ("unspecified", "cancellation"),
+    ("unspecified_return", "return"),
+]
+
+_REASON_CONSTRAINTS = """
+ALTER TABLE orders
+  ADD CONSTRAINT orders_cancellation_reason_code_fkey
+    FOREIGN KEY (cancellation_reason_code) REFERENCES resolution_reasons(code),
+  ADD CONSTRAINT orders_return_reason_code_fkey
+    FOREIGN KEY (return_reason_code) REFERENCES resolution_reasons(code);
+
+ALTER TABLE orders
+  ADD CONSTRAINT orders_cancellation_reason_required CHECK (
+    (status = 'CANCELLED' AND cancellation_reason_code IS NOT NULL)
+    OR (status <> 'CANCELLED' AND cancellation_reason_code IS NULL)
+  ),
+  ADD CONSTRAINT orders_return_reason_required CHECK (
+    (status = 'RETURNED' AND return_reason_code IS NOT NULL)
+    OR (status <> 'RETURNED' AND return_reason_code IS NULL)
+  );
+
+CREATE INDEX IF NOT EXISTS orders_cancellation_reason_idx
+  ON orders(cancellation_reason_code) WHERE cancellation_reason_code IS NOT NULL;
+CREATE INDEX IF NOT EXISTS orders_return_reason_idx
+  ON orders(return_reason_code) WHERE return_reason_code IS NOT NULL;
+"""
+
+
+def backfill_and_constrain_reasons(conn: psycopg.Connection) -> str:
+    """Backfill already-resolved orders, THEN add the constraints.
+
+    Ordering is load-bearing, the same trap as the payment_status step above: a
+    database with cancelled orders predating this feature has rows that violate
+    "a cancelled order must carry a reason" the moment the CHECK is added. They
+    are backfilled to the inactive 'unspecified' codes first — which reports
+    render as "Not recorded", an honest answer, rather than attributing a reason
+    to a customer who never gave one.
+    """
+    with conn.cursor() as cur:
+        for code, kind in _LEGACY_REASON_ROWS:
+            cur.execute(
+                """
+                INSERT INTO resolution_reasons (code, kind, label, applies_to, active, sort_order)
+                VALUES (%s, %s, 'Not recorded', 'both', false, 999)
+                ON CONFLICT (code) DO NOTHING
+                """,
+                (code, kind),
+            )
+        cur.execute(
+            "UPDATE orders SET cancellation_reason_code = 'unspecified' "
+            "WHERE status = 'CANCELLED' AND cancellation_reason_code IS NULL"
+        )
+        backfilled_cancel = cur.rowcount
+        cur.execute(
+            "UPDATE orders SET return_reason_code = 'unspecified_return' "
+            "WHERE status = 'RETURNED' AND return_reason_code IS NULL"
+        )
+        backfilled_return = cur.rowcount
+        # Clear any reason sitting on a non-resolved order, which the CHECK also
+        # forbids. Should be none, but a half-applied earlier run could leave one.
+        cur.execute(
+            "UPDATE orders SET cancellation_reason_code = NULL, cancellation_reason_note = NULL "
+            "WHERE status <> 'CANCELLED' AND cancellation_reason_code IS NOT NULL"
+        )
+        cur.execute(
+            "UPDATE orders SET return_reason_code = NULL, return_reason_note = NULL "
+            "WHERE status <> 'RETURNED' AND return_reason_code IS NOT NULL"
+        )
+        conn.commit()
+
+        cur.execute(
+            "SELECT count(*) FROM pg_constraint WHERE conname = 'orders_cancellation_reason_required'"
+        )
+        if cur.fetchone()[0]:
+            return f"already current (backfilled {backfilled_cancel}+{backfilled_return})"
+        cur.execute(_REASON_CONSTRAINTS)
+    conn.commit()
+    return f"constraints added; backfilled {backfilled_cancel} cancelled / {backfilled_return} returned"
 
 
 def relax_coupon_source_constraint(conn: psycopg.Connection) -> str:
@@ -201,6 +317,7 @@ def main() -> None:
             conn.commit()
             print(f"  ok  {description}")
         print(f"  ok  coupons source constraint — {relax_coupon_source_constraint(conn)}")
+        print(f"  ok  resolution reasons — {backfill_and_constrain_reasons(conn)}")
 
     print("\nDone. Every step is idempotent; re-running changes nothing.")
 

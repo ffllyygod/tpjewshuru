@@ -93,7 +93,7 @@ def test_wrong_customer_cannot_see_order():
 def test_cancel_without_prior_eligibility_check_rejected():
     customer_id, order_number = _customer_and_order("TPJ-10000")
     conv_id = _new_conversation(customer_id)
-    result = order_tools.cancel_order(customer_id, order_number, conversation_id=conv_id)
+    result = order_tools.cancel_order(customer_id, order_number, conversation_id=conv_id, reason_code="changed_mind")
     assert result["cancelled"] is False
     assert result["reason"] == "no_pending_confirmation"
 
@@ -107,7 +107,7 @@ def test_eligibility_from_different_conversation_does_not_authorize_cancel():
 
     # conv_b never called check_cancellation_eligibility — it shouldn't be able to
     # cancel just because conv_a did.
-    result = order_tools.cancel_order(customer_id, order_number, conversation_id=conv_b)
+    result = order_tools.cancel_order(customer_id, order_number, conversation_id=conv_b, reason_code="changed_mind")
     assert result["cancelled"] is False
     assert result["reason"] == "no_pending_confirmation"
 
@@ -120,12 +120,12 @@ def test_full_cancellation_happy_path():
     elig = order_tools.check_cancellation_eligibility(customer_id, order_number, conv_id)
     assert elig["eligible"] is True
 
-    result = order_tools.cancel_order(customer_id, order_number, conversation_id=conv_id)
+    result = order_tools.cancel_order(customer_id, order_number, conversation_id=conv_id, reason_code="changed_mind")
     assert result["cancelled"] is True
 
     # The confirmation is single-use — calling again must fail even though the
     # order was cancellable, since it's no longer PLACED/CONFIRMED anyway.
-    replay = order_tools.cancel_order(customer_id, order_number, conversation_id=conv_id)
+    replay = order_tools.cancel_order(customer_id, order_number, conversation_id=conv_id, reason_code="changed_mind")
     assert replay["cancelled"] is False
     assert replay["reason"] in ("token_used", "wrong_status")
 

@@ -102,6 +102,9 @@ _TOOL_IMPL = {
     "get_order_status": order_tools.get_order_status,
     "check_cancellation_eligibility": order_tools.check_cancellation_eligibility,
     "cancel_order": order_tools.cancel_order,
+    "list_resolution_reasons": order_tools.list_resolution_reasons,
+    "check_return_eligibility": order_tools.check_return_eligibility,
+    "request_return": order_tools.request_return,
     "search_knowledge": knowledge_tools.search_knowledge,
     "search_products": product_tools.search_products,
     "get_product_details": product_tools.get_product_details,
@@ -128,6 +131,9 @@ _TOOL_IMPL = {
     "admin_find_customer": admin_tools.admin_find_customer,
     "admin_customer_profile": admin_tools.admin_customer_profile,
     "admin_bot_stats": admin_tools.admin_bot_stats,
+    "admin_resolution_reasons": admin_tools.admin_resolution_reasons,
+    "admin_preview_order_return": admin_tools.admin_preview_order_return,
+    "admin_return_order": admin_tools.admin_return_order,
     # Staff writes — each preview mints a confirmation the matching apply
     # consumes; see the WRITES section of src/tools/admin_tools.py.
     "admin_preview_order_cancellation": admin_tools.admin_preview_order_cancellation,
@@ -139,12 +145,14 @@ _TOOL_IMPL = {
 }
 _NEEDS_CUSTOMER_ID = {
     "list_customer_orders", "get_order_status", "check_cancellation_eligibility", "cancel_order",
+    "check_return_eligibility", "request_return",
     "offer_settlement_options", "issue_coupon", "request_cash_refund", "get_my_coupons",
     "redeem_coupon", "place_order",
     "start_gold_sip", "pay_sip_installment", "get_my_gold_sips", "cancel_gold_sip", "redeem_gold_sip",
 }
 _NEEDS_CONVERSATION_ID = {
     "check_cancellation_eligibility", "cancel_order", "issue_coupon",
+    "check_return_eligibility", "request_return",
     # Every admin write, both halves: the preview mints a token scoped to this
     # conversation and the apply looks it up by the same scope. Injected here,
     # never model-supplied — a model that could pass a conversation_id could
@@ -152,6 +160,7 @@ _NEEDS_CONVERSATION_ID = {
     "admin_preview_order_cancellation", "admin_cancel_order",
     "admin_preview_stock_adjustment", "admin_adjust_stock",
     "admin_preview_goodwill_coupon", "admin_issue_goodwill_coupon",
+    "admin_preview_order_return", "admin_return_order",
 }
 
 # Staff-only tools. Populated as admin tools land; the gate below is already
@@ -174,6 +183,7 @@ _ADMIN_EXCLUDED_FROM_CUSTOMER = _ADMIN_ONLY
 # about "my orders" should start a normal customer conversation.
 _CUSTOMER_ONLY = {
     "list_customer_orders", "get_order_status", "check_cancellation_eligibility", "cancel_order",
+    "check_return_eligibility", "request_return",
     "offer_settlement_options", "issue_coupon", "request_cash_refund", "get_my_coupons",
     "redeem_coupon", "place_order",
     "start_gold_sip", "pay_sip_installment", "get_my_gold_sips", "cancel_gold_sip", "redeem_gold_sip",
@@ -236,6 +246,11 @@ def _execute_tool(
         kwargs["customer_id"] = customer_id  # injected server-side, agent cannot override this
     if tool_name in _NEEDS_CONVERSATION_ID:
         kwargs["conversation_id"] = conversation_id  # scopes the confirmation token to this conversation
+    if tool_name == "list_resolution_reasons":
+        # Which reasons are on offer follows from the persona, not from a
+        # parameter the model picks — otherwise a customer conversation could
+        # ask for the staff list and be shown "suspected fraudulent order".
+        kwargs["audience"] = "staff" if is_admin else "customer"
 
     try:
         result = fn(**kwargs)

@@ -32,6 +32,7 @@ from psycopg.rows import dict_row
 from src.db.connection import get_conn
 from src.tools.coupon_tools import get_policy, mint_coupon
 from src.tools.formatting import format_inr
+from src.tools.order_tools import RETURN_WINDOW_DAYS, _restock_order_items, resolve_reason
 
 # Revenue always excludes cancelled and returned orders, and is always net of
 # discounts. Defined once and reused by every report below so two tools can
@@ -306,6 +307,103 @@ def admin_sales_breakdown(
         "period_total_cents": total_cents,
         "period_total_display": total_display,
         "note": "Share percentages are of total revenue for the whole period, not just the rows shown.",
+    }
+
+
+def admin_resolution_reasons(
+    actor_customer_id: str,
+    kind: str = "cancellation",
+    period: str = "month",
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """Why orders were cancelled or returned in a period, with counts and lost value.
+
+    Deliberately NOT a dimension of admin_sales_breakdown: that tool's rows are
+    revenue and its shares are of period revenue, whereas these are *lost*
+    revenue. Folding them in would produce rows that look like income and a
+    share denominator that means nothing.
+    """
+    if kind not in ("cancellation", "return"):
+        return {"error": "bad_kind", "message": "kind must be 'cancellation' or 'return'."}
+    try:
+        start, end, label = _resolve_period(period, start_date, end_date)
+    except ValueError as e:
+        return {"error": "bad_period", "message": str(e)}
+
+    # Column and status vary by kind; both are from a closed set validated
+    # above, never interpolated from caller input.
+    code_col = "cancellation_reason_code" if kind == "cancellation" else "return_reason_code"
+    note_col = "cancellation_reason_note" if kind == "cancellation" else "return_reason_note"
+    status = "CANCELLED" if kind == "cancellation" else "RETURNED"
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT o.{code_col} AS code,
+                   COALESCE(cr.label, 'Not recorded') AS label,
+                   cr.applies_to,
+                   COUNT(*) AS n,
+                   COALESCE(SUM(o.total_amount_cents - o.discount_cents), 0) AS lost
+            FROM orders o
+            LEFT JOIN resolution_reasons cr ON cr.code = o.{code_col}
+            WHERE o.status = %s AND o.placed_at >= %s AND o.placed_at < %s
+            GROUP BY 1, 2, 3
+            ORDER BY n DESC
+            """,
+            (status, start, end),
+        )
+        rows = cur.fetchall()
+
+        # Free-text notes are where the reasons the pick-list doesn't cover show
+        # up, so a few recent ones are worth surfacing — capped, because this is
+        # customer-written text and a report shouldn't become a transcript dump.
+        cur.execute(
+            f"""
+            SELECT o.order_number, o.{note_col} AS note
+            FROM orders o
+            WHERE o.status = %s AND o.{note_col} IS NOT NULL
+              AND o.placed_at >= %s AND o.placed_at < %s
+            ORDER BY o.placed_at DESC LIMIT 5
+            """,
+            (status, start, end),
+        )
+        notes = cur.fetchall()
+
+    total_n = sum(r["n"] for r in rows)
+    total_lost = sum(r["lost"] for r in rows)
+    denominator = total_n or 1
+
+    # Per-row counts are safe to expose (they're not money), but per-row value is
+    # display-only — same rule as every other list here.
+    out = []
+    for r in rows:
+        share, share_display = _pct(r["n"] / denominator * 100)
+        out.append({
+            "reason_code": r["code"] or "unrecorded",
+            "reason_label": r["label"],
+            "raised_by": r["applies_to"] or "unknown",
+            "count": r["n"],
+            "share_percent": share,
+            "share_percent_display": share_display,
+            "lost_value_display": format_inr(r["lost"]),
+        })
+
+    lost_cents, lost_display = _money(total_lost)
+    return {
+        "kind": kind,
+        "period": period,
+        "period_label": label,
+        "rows": out,
+        "row_count": len(out),
+        "total_resolutions": total_n,
+        "total_lost_value_cents": lost_cents,
+        "total_lost_value_display": lost_display,
+        "recent_notes": [{"order_number": n["order_number"], "note": n["note"]} for n in notes],
+        "note": (
+            f"Shares are of {kind}s in this period, NOT of revenue. 'Not recorded' covers orders "
+            "resolved before reasons were captured — it is not a reason anyone chose."
+        ),
     }
 
 
@@ -920,6 +1018,7 @@ def _order_cancellable(order) -> dict | None:
 
 def admin_preview_order_cancellation(
     actor_customer_id: str, order_number: str, reason: str, conversation_id: str,
+    reason_code: str | None = None, reason_note: str | None = None,
 ) -> dict:
     """Show exactly what cancelling this order would do, and mint the
     confirmation that admin_cancel_order requires. Changes nothing."""
@@ -936,8 +1035,16 @@ def admin_preview_order_cancellation(
         if blocked:
             return {"error": blocked["reason"], "message": blocked["message"]}
 
+        # The structured code is what makes cancellations groupable in reports;
+        # `reason` stays as the staff member's own words for the audit log. Both
+        # go into the token, so neither can drift between preview and apply.
+        code, note, err = resolve_reason(cur, "cancellation", reason_code, reason_note or reason, "staff")
+        if err:
+            return err
+
         _mint_token(
-            cur, conversation_id, "admin_cancel_order", order["id"], {"reason": reason},
+            cur, conversation_id, "admin_cancel_order", order["id"],
+            {"reason": reason, "reason_code": code, "reason_note": note},
         )
         conn.commit()
 
@@ -957,6 +1064,8 @@ def admin_preview_order_cancellation(
             "An audit entry recording you as the staff member and this reason",
         ],
         "reason": reason,
+        "reason_code": code,
+        "reason_note": note,
         "staff_override_note": (
             "This bypasses the 24-hour window customers are held to — it is a staff override "
             "and is logged as one."
@@ -976,6 +1085,7 @@ def admin_preview_order_cancellation(
 
 def admin_cancel_order(
     actor_customer_id: str, order_number: str, reason: str, conversation_id: str,
+    reason_code: str | None = None, reason_note: str | None = None,
 ) -> dict:
     """Cancel any customer's order. Requires admin_preview_order_cancellation to
     have run in this conversation for this order with this same reason."""
@@ -989,8 +1099,13 @@ def admin_cancel_order(
         if not order:
             return {"applied": False, "reason": "not_found", "message": f"No order {order_number}."}
 
+        code, note, rerr = resolve_reason(cur, "cancellation", reason_code, reason_note or reason, "staff")
+        if rerr:
+            return {"applied": False, **rerr}
+
         token_id, err = _claim_token(
-            cur, conversation_id, "admin_cancel_order", order["id"], {"reason": reason},
+            cur, conversation_id, "admin_cancel_order", order["id"],
+            {"reason": reason, "reason_code": code, "reason_note": note},
         )
         if err:
             return err
@@ -1002,18 +1117,29 @@ def admin_cancel_order(
             return {"applied": False, **blocked}
 
         before = {"status": order["status"], "payment_status": order["payment_status"]}
-        cur.execute("UPDATE orders SET status = 'CANCELLED' WHERE id = %s", (order["id"],))
+        cur.execute(
+            """
+            UPDATE orders
+            SET status = 'CANCELLED', cancellation_reason_code = %s, cancellation_reason_note = %s
+            WHERE id = %s
+            """,
+            (code, note, order["id"]),
+        )
+        restocked = _restock_order_items(cur, order["id"])
         cur.execute(
             """
             INSERT INTO order_status_history (order_id, from_status, to_status, reason)
-            VALUES (%s, %s, 'CANCELLED', 'admin_cancelled')
+            VALUES (%s, %s, 'CANCELLED', %s)
             """,
-            (order["id"], order["status"]),
+            (order["id"], order["status"], f"admin_cancelled:{code}"),
         )
         cur.execute("UPDATE confirmation_tokens SET used_at = now() WHERE id = %s", (token_id,))
         _log_admin_action(
             cur, actor_customer_id, conversation_id, "admin_cancel_order", "orders", order["id"],
-            before, {"status": "CANCELLED", "payment_status": order["payment_status"]}, reason,
+            before,
+            {"status": "CANCELLED", "payment_status": order["payment_status"],
+             "cancellation_reason_code": code, "cancellation_reason_note": note},
+            reason,
         )
         conn.commit()
 
@@ -1024,6 +1150,9 @@ def admin_cancel_order(
         "previous_status": before["status"],
         "new_status": "CANCELLED",
         "reason": reason,
+        "reason_code": code,
+        "reason_note": note,
+        "restocked_items": restocked,
         "message": (
             f"Order {order['order_number']} ({order['customer_name']}) is cancelled and the action "
             "is logged against your account. No money has moved — settlement is a separate step."
@@ -1387,5 +1516,205 @@ def admin_issue_goodwill_coupon(
         "message": (
             f"Issued {format_inr(coupon['total_cents'])} of store credit to {customer['name']} "
             f"(code {coupon['code']}). Give them the code — it's already active."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Write 4 — process a return on any customer's order (staff override)
+# ---------------------------------------------------------------------------
+
+
+def _order_returnable(cur, order, allow_final_sale: bool) -> dict | None:
+    """Shared by preview and apply so the two can't drift on what's allowed.
+
+    Staff deliberately reach further than a customer: no 30-day window, because
+    handling the out-of-policy case by hand is exactly why a staff override
+    exists. Final sale is different — that's a property of the product, not a
+    timing rule, so it still blocks unless the item actually arrived damaged.
+    """
+    status = order["status"]
+    if status == "RETURNED":
+        return {"reason": "already_returned", "message": f"Order {order['order_number']} is already RETURNED."}
+    if status != "DELIVERED":
+        return {
+            "reason": "wrong_status",
+            "message": (
+                f"Order {order['order_number']} is {status}, not DELIVERED. Only a delivered order "
+                "can be returned — cancel it instead if it hasn't shipped."
+            ),
+        }
+
+    cur.execute(
+        """
+        SELECT p.name, p.sku FROM order_items oi JOIN products p ON p.id = oi.product_id
+        WHERE oi.order_id = %s AND p.returnable = false
+        """,
+        (order["id"],),
+    )
+    final_sale = cur.fetchall()
+    if final_sale and not allow_final_sale:
+        names = ", ".join(f"{p['name']} ({p['sku']})" for p in final_sale)
+        return {
+            "reason": "final_sale",
+            "message": (
+                f"Contains final-sale items: {names}. These are returnable only when they arrived "
+                "damaged or defective — use reason_code 'damaged_on_arrival' if that is the case."
+            ),
+        }
+    return None
+
+
+def _delivered_at_and_window(cur, order_id: str) -> tuple[datetime | None, bool]:
+    cur.execute("SELECT delivered_at FROM orders WHERE id = %s", (order_id,))
+    delivered_at = cur.fetchone()["delivered_at"]
+    if not delivered_at:
+        return None, False
+    if delivered_at.tzinfo is None:
+        delivered_at = delivered_at.replace(tzinfo=timezone.utc)
+    return delivered_at, (datetime.now(timezone.utc) - delivered_at).days > RETURN_WINDOW_DAYS
+
+
+def admin_preview_order_return(
+    actor_customer_id: str, order_number: str, reason: str, conversation_id: str,
+    reason_code: str | None = None, reason_note: str | None = None,
+) -> dict:
+    """Show what returning this order would do, and mint the confirmation that
+    admin_return_order requires. Changes nothing."""
+    try:
+        reason = _clean_reason(reason)
+    except ValueError as e:
+        return {"error": "reason_required", "message": str(e)}
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        order = _load_order_for_write(cur, order_number)
+        if not order:
+            return {"error": "not_found", "message": f"No order {order_number}."}
+
+        code, note, err = resolve_reason(cur, "return", reason_code, reason_note or reason, "staff")
+        if err:
+            return err
+
+        blocked = _order_returnable(cur, order, allow_final_sale=(code == "damaged_on_arrival"))
+        if blocked:
+            return {"error": blocked["reason"], "message": blocked["message"]}
+
+        delivered_at, outside_window = _delivered_at_and_window(cur, order["id"])
+
+        _mint_token(
+            cur, conversation_id, "admin_return_order", order["id"],
+            {"reason": reason, "reason_code": code, "reason_note": note},
+        )
+        conn.commit()
+
+    _, total_display = _money(order["total_amount_cents"] - order["discount_cents"])
+    return {
+        "preview": True,
+        "order_number": order["order_number"],
+        "customer_name": order["customer_name"],
+        "customer_email": order["customer_email"],
+        "current_status": order["status"],
+        "order_total_display": total_display,
+        "delivered_at": delivered_at,
+        "outside_return_window": outside_window,
+        "reason": reason,
+        "reason_code": code,
+        "reason_note": note,
+        "will_change": [
+            f"Order status {order['status']} -> RETURNED",
+            "The order's items go back into stock",
+            "An audit entry recording you as the staff member and this reason",
+        ],
+        "staff_override_note": (
+            f"Delivered more than {RETURN_WINDOW_DAYS} days ago — outside the window customers are "
+            "held to. This is a staff override and is logged as one."
+            if outside_window else
+            f"Within the {RETURN_WINDOW_DAYS}-day return window."
+        ),
+        "settlement_note": (
+            "This does NOT refund anything. Once returned, the customer can settle it (cash refund "
+            "or a coupon worth more) through their own chat."
+        ),
+        "confirmation_expires_in_minutes": ADMIN_TOKEN_TTL_MINUTES,
+        "next_step": (
+            "Read this back — order number, customer name, total — and ask the staff member to "
+            "confirm. Only call admin_return_order after they say yes."
+        ),
+    }
+
+
+def admin_return_order(
+    actor_customer_id: str, order_number: str, reason: str, conversation_id: str,
+    reason_code: str | None = None, reason_note: str | None = None,
+) -> dict:
+    """Return any customer's order. Requires admin_preview_order_return to have
+    run in this conversation for this order with these same values."""
+    try:
+        reason = _clean_reason(reason)
+    except ValueError as e:
+        return {"applied": False, "reason": "reason_required", "message": str(e)}
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        order = _load_order_for_write(cur, order_number)
+        if not order:
+            return {"applied": False, "reason": "not_found", "message": f"No order {order_number}."}
+
+        code, note, rerr = resolve_reason(cur, "return", reason_code, reason_note or reason, "staff")
+        if rerr:
+            return {"applied": False, **rerr}
+
+        token_id, err = _claim_token(
+            cur, conversation_id, "admin_return_order", order["id"],
+            {"reason": reason, "reason_code": code, "reason_note": note},
+        )
+        if err:
+            return err
+
+        # Re-validated from scratch: the customer may have returned it themselves
+        # between the preview and this call.
+        blocked = _order_returnable(cur, order, allow_final_sale=(code == "damaged_on_arrival"))
+        if blocked:
+            return {"applied": False, **blocked}
+
+        before = {"status": order["status"], "payment_status": order["payment_status"]}
+        cur.execute(
+            """
+            UPDATE orders
+            SET status = 'RETURNED', return_reason_code = %s, return_reason_note = %s, returned_at = now()
+            WHERE id = %s
+            """,
+            (code, note, order["id"]),
+        )
+        restocked = _restock_order_items(cur, order["id"])
+        cur.execute(
+            """
+            INSERT INTO order_status_history (order_id, from_status, to_status, reason)
+            VALUES (%s, %s, 'RETURNED', %s)
+            """,
+            (order["id"], order["status"], f"admin_returned:{code}"),
+        )
+        cur.execute("UPDATE confirmation_tokens SET used_at = now() WHERE id = %s", (token_id,))
+        _log_admin_action(
+            cur, actor_customer_id, conversation_id, "admin_return_order", "orders", order["id"],
+            before,
+            {"status": "RETURNED", "payment_status": order["payment_status"],
+             "return_reason_code": code, "return_reason_note": note},
+            reason,
+        )
+        conn.commit()
+
+    return {
+        "applied": True,
+        "order_number": order["order_number"],
+        "customer_name": order["customer_name"],
+        "previous_status": before["status"],
+        "new_status": "RETURNED",
+        "reason": reason,
+        "reason_code": code,
+        "reason_note": note,
+        "restocked_items": restocked,
+        "message": (
+            f"Order {order['order_number']} ({order['customer_name']}) is returned, stock is back, "
+            "and the action is logged against your account. No money has moved — settlement is separate."
         ),
     }

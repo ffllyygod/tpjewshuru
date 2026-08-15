@@ -49,6 +49,10 @@ CREATE TABLE products (
   -- Discontinuing a product can't be a DELETE (order_items FKs it), so soft-delete
   -- is the only correct shape. search_products filters on this.
   active               BOOLEAN NOT NULL DEFAULT true,
+  -- Final-sale items. The seeded Return Policy doc says custom-sized rings and
+  -- engraved pieces cannot be returned unless defective; without this column the
+  -- assistant would happily accept a return that its own quoted policy forbids.
+  returnable           BOOLEAN NOT NULL DEFAULT true,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -80,7 +84,22 @@ CREATE TABLE orders (
   -- mutually referential and the FKs have to be added after all CREATE TABLEs.
   coupon_id                 UUID,
   gold_sip_subscription_id  UUID,
-  discount_cents            BIGINT NOT NULL DEFAULT 0
+  discount_cents            BIGINT NOT NULL DEFAULT 0,
+  -- Why this order ended early. Split into a CODE and a free-text NOTE on
+  -- purpose: the code is what makes "why are people cancelling" a groupable
+  -- question, and free text alone would leave that answerable only by reading
+  -- every row. The note carries what the code can't ("wanted 16 not 18").
+  -- Nullable because most orders are neither cancelled nor returned, and
+  -- because orders resolved before this existed genuinely have no recorded
+  -- reason — reporting those as "Not recorded" is honest, inventing a reason
+  -- for them would not be. FKs added below, once resolution_reasons exists.
+  cancellation_reason_code  TEXT,
+  cancellation_reason_note  TEXT,
+  return_reason_code        TEXT,
+  return_reason_note        TEXT,
+  -- Mirrors shipped_at/delivered_at. order_status_history could derive this,
+  -- but every return report would then need a join to answer "when".
+  returned_at               TIMESTAMPTZ
 );
 
 CREATE INDEX orders_customer_id_idx ON orders(customer_id);
@@ -100,6 +119,58 @@ CREATE TABLE order_items (
 CREATE INDEX order_items_order_id_idx ON order_items(order_id);
 -- Top-seller / revenue-by-category reports all join order_items by product_id.
 CREATE INDEX order_items_product_id_idx ON order_items(product_id);
+
+-- Team-editable pick-list for why an order ended early, same principle as
+-- coupon_policy: changing the options a customer is offered shouldn't need a
+-- code deploy.
+--
+-- Two independent axes, deliberately not collapsed into one:
+--   kind       — WHAT happened (cancelled before dispatch vs returned after
+--                delivery). The vocabularies barely overlap: "delivery is
+--                taking too long" can only be a cancellation, "doesn't fit"
+--                can only be a return.
+--   applies_to — WHO may say it. A customer must never be offered "suspected
+--                fraudulent order", and staff shouldn't wade through
+--                customer-voice options to find theirs.
+--
+-- requires_note marks the ones that are useless alone: 'other' recorded with no
+-- note says exactly as much as no reason at all.
+CREATE TABLE resolution_reasons (
+  code           TEXT PRIMARY KEY,
+  kind           TEXT NOT NULL CHECK (kind IN ('cancellation', 'return')),
+  label          TEXT NOT NULL,
+  applies_to     TEXT NOT NULL DEFAULT 'both' CHECK (applies_to IN ('customer', 'staff', 'both')),
+  requires_note  BOOLEAN NOT NULL DEFAULT false,
+  active         BOOLEAN NOT NULL DEFAULT true,
+  sort_order     INT NOT NULL DEFAULT 100
+);
+
+ALTER TABLE orders
+  ADD CONSTRAINT orders_cancellation_reason_code_fkey
+    FOREIGN KEY (cancellation_reason_code) REFERENCES resolution_reasons(code),
+  ADD CONSTRAINT orders_return_reason_code_fkey
+    FOREIGN KEY (return_reason_code) REFERENCES resolution_reasons(code);
+
+-- A resolved order must say why, and must not claim the other kind's reason.
+-- Enforced in the DB rather than in application code so that no future code
+-- path can write a reasonless cancellation or return — the same principle as
+-- coupons_source_matches_type. Rows resolved before reasons existed are
+-- backfilled to the inactive 'unspecified' codes by the migration script,
+-- BEFORE these constraints are added; otherwise they fail to validate.
+ALTER TABLE orders
+  ADD CONSTRAINT orders_cancellation_reason_required CHECK (
+    (status = 'CANCELLED' AND cancellation_reason_code IS NOT NULL)
+    OR (status <> 'CANCELLED' AND cancellation_reason_code IS NULL)
+  ),
+  ADD CONSTRAINT orders_return_reason_required CHECK (
+    (status = 'RETURNED' AND return_reason_code IS NOT NULL)
+    OR (status <> 'RETURNED' AND return_reason_code IS NULL)
+  );
+
+CREATE INDEX orders_cancellation_reason_idx
+  ON orders(cancellation_reason_code) WHERE cancellation_reason_code IS NOT NULL;
+CREATE INDEX orders_return_reason_idx
+  ON orders(return_reason_code) WHERE return_reason_code IS NOT NULL;
 
 CREATE TABLE order_status_history (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

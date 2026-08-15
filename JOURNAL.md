@@ -6,6 +6,73 @@ debugging this at 2am, and interview-me explaining design choices out loud.
 
 ---
 
+## 2026-08-15 (returns) — Reasons for everything, and an inventory bug found on the way
+
+Two gaps, both found by actually using the deployed bot.
+
+**Cancellations recorded that they happened, never why.** `cancel_order` wrote a
+fixed `'customer_requested'` string into `order_status_history` and nothing onto
+the order. "Why are people cancelling" — the most useful question a retailer can
+ask about lost sales — was unanswerable.
+
+**Returns didn't exist.** `RETURNED` was in the enum, in the seed data, in every
+report, and `coupon_tools` already paid a 15% return bonus on it — but nothing
+in the codebase ever set that status at runtime. Meanwhile the seeded Return
+Policy doc, which `search_knowledge` quotes back to customers, told them to
+start a return. The assistant was describing a process it could not perform.
+
+**And a third, found while planning: cancelling never restored stock.**
+`place_order` does a guarded atomic decrement; nothing did the inverse. So
+inventory was a one-way ratchet — every cancelled order permanently destroyed
+stock, and `admin_inventory_status` drifted further from reality with each one.
+Returns would have inherited it. `_restock_order_items` is the fix, shared by
+all four paths (customer/staff × cancel/return), with tests asserting exact
+before/after equality rather than "went up".
+
+### Design notes
+
+**One `resolution_reasons` table, two axes.** `kind` (cancellation | return) is
+*what happened*; `applies_to` (customer | staff | both) is *who may say it*.
+Collapsing them would have meant offering customers "suspected fraudulent
+order". The vocabularies barely overlap anyway — "delivery is taking too long"
+can only be a cancellation, "doesn't fit" can only be a return — so a code from
+the wrong kind is rejected rather than silently accepted, which is what keeps
+the report meaningful.
+
+**The constraint is in the database, not in Python.** A `CANCELLED` order must
+carry a cancellation reason and no return reason, and vice versa. Same principle
+as `coupons_source_matches_type`: no future code path can write a reasonless
+resolution, because the DB won't accept one.
+
+**Final sale is enforced, not just documented.** `products.returnable` exists
+because the policy doc says custom-sized and engraved pieces can't be returned;
+without the column the bot would have accepted a return its own quoted policy
+forbids. Staff can override it only with `damaged_on_arrival`, which is the
+exception the policy itself names.
+
+**A dedicated report tool, not a breakdown dimension.** `admin_resolution_reasons`
+is separate from `admin_sales_breakdown` because that tool's rows are revenue
+and its shares are of period revenue — these are *lost* revenue. Folding them in
+would have produced rows that look like income under a denominator that means
+nothing.
+
+### Verification
+
+205 tests (25 new for returns, 8 for staff returns) and 31/31 live audit
+scenarios. The migration was rehearsed before touching anything deployed, on a
+scratch database built from the previous `schema.sql` seeded with a cancelled
+AND a returned order that had no reason — exactly the rows a naive CHECK would
+reject. Backfilling those to the inactive `unspecified` codes must happen
+*before* the constraints are added; same ordering trap as the `payment_status`
+step. Post-migration the column structure matched a fresh database exactly, the
+second run was a no-op, and the CHECK correctly refused to let a cancelled order
+drop its reason.
+
+Rows resolved before this existed report as "Not recorded". That's honest;
+attributing a reason to a customer who never gave one would not be.
+
+---
+
 ## 2026-08-15 (deploy) — Migrating a live database with no migration framework
 
 The admin persona needed six schema changes against a deployed database holding

@@ -51,14 +51,92 @@ TOOLS = [
             "Cancel an order. You must have already called check_cancellation_eligibility for this "
             "exact order earlier in this conversation, AND the customer must have explicitly said "
             "yes/confirm to cancelling in their own words before you call this. Never call this "
-            "speculatively or to 'check' something."
+            "speculatively or to 'check' something. A reason_code is REQUIRED — get it from "
+            "list_resolution_reasons (kind='cancellation') and ask which applies; do not guess one."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "order_number": {"type": "string"},
+                "reason_code": {
+                    "type": "string",
+                    "description": (
+                        "A cancellation code from list_resolution_reasons, copied verbatim. Pick the one the "
+                        "customer actually indicated — never the closest-looking guess. If nothing "
+                        "fits, use 'other' and put their own words in reason_note."
+                    ),
+                },
+                "reason_note": {
+                    "type": "string",
+                    "description": (
+                        "The customer's own words, when they add detail beyond the code (e.g. "
+                        "'wanted size 16, ordered 18'). Required when reason_code is 'other'."
+                    ),
+                },
             },
+            "required": ["order_number", "reason_code"],
+        },
+    },
+    {
+        "name": "list_resolution_reasons",
+        "description": (
+            "The reasons a cancellation or a return can be recorded against. Call this before "
+            "cancel_order or request_return so you can offer real options instead of inventing "
+            "categories. The store configures these, so read them fresh rather than reusing a list "
+            "you remember from earlier."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["cancellation", "return"],
+                    "description": "'cancellation' for an order not yet delivered, 'return' for a delivered one.",
+                },
+            },
+            "required": ["kind"],
+        },
+    },
+    {
+        "name": "check_return_eligibility",
+        "description": (
+            "Check whether a DELIVERED order can be returned (within the 30-day window, not "
+            "final-sale) and, if so, obtain the confirmation needed to proceed. ALWAYS call this "
+            "before request_return. For an order that hasn't been delivered yet, cancellation is "
+            "the relevant flow, not this one."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"order_number": {"type": "string"}},
             "required": ["order_number"],
+        },
+    },
+    {
+        "name": "request_return",
+        "description": (
+            "Return a delivered order. You must have already called check_return_eligibility for "
+            "this exact order in this conversation, AND the customer must have explicitly "
+            "confirmed in their own words. A reason_code is REQUIRED — get it from "
+            "list_resolution_reasons with kind='return' and ask which applies; never guess one. "
+            "After this succeeds, call offer_settlement_options to present refund vs coupon."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order_number": {"type": "string"},
+                "reason_code": {
+                    "type": "string",
+                    "description": (
+                        "A return code from list_resolution_reasons, copied verbatim. Cancellation "
+                        "codes are NOT valid here. If nothing fits use 'other_return' with a note."
+                    ),
+                },
+                "reason_note": {
+                    "type": "string",
+                    "description": "The customer's own words. Required when reason_code is 'other_return'.",
+                },
+            },
+            "required": ["order_number", "reason_code"],
         },
     },
     {
@@ -305,6 +383,25 @@ ADMIN_TOOLS = [
         },
     },
     {
+        "name": "admin_resolution_reasons",
+        "description": (
+            "Why orders were cancelled or returned in a period — counts per reason, share, and the "
+            "value lost. Use for 'why are people cancelling', 'top cancellation reason', 'why are "
+            "things coming back', 'how much did we lose to returns'. Shares are of cancellations "
+            "or returns, NOT of revenue."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["cancellation", "return"]},
+                "period": {"type": "string", "description": _PERIOD_DESC},
+                "start_date": {"type": "string"},
+                "end_date": {"type": "string"},
+            },
+            "required": ["kind", "period"],
+        },
+    },
+    {
         "name": "admin_inventory_status",
         "description": (
             "Stock levels across the catalogue. filter='low_stock' (at or below each product's "
@@ -418,6 +515,14 @@ ADMIN_TOOLS = [
             "type": "object",
             "properties": {
                 "order_number": {"type": "string", "description": "e.g. TPJ-123456. NOT a product SKU."},
+                "reason_code": {
+                    "type": "string",
+                    "description": (
+                        "A cancellation code from list_resolution_reasons (staff codes included), copied "
+                        "verbatim. This is what makes cancellations reportable later."
+                    ),
+                },
+                "reason_note": {"type": "string", "description": "Extra detail; required for code 'other'."},
                 "reason": {
                     "type": "string",
                     "description": (
@@ -427,7 +532,7 @@ ADMIN_TOOLS = [
                     ),
                 },
             },
-            "required": ["order_number", "reason"],
+            "required": ["order_number", "reason", "reason_code"],
         },
     },
     {
@@ -443,9 +548,62 @@ ADMIN_TOOLS = [
             "type": "object",
             "properties": {
                 "order_number": {"type": "string"},
+                "reason_code": {"type": "string", "description": "Must match the code given to the preview."},
+                "reason_note": {"type": "string", "description": "Must match the note given to the preview."},
                 "reason": {"type": "string", "description": "Must match the reason given to the preview, verbatim."},
             },
-            "required": ["order_number", "reason"],
+            "required": ["order_number", "reason", "reason_code"],
+        },
+    },
+    {
+        "name": "admin_preview_order_return",
+        "description": (
+            "STEP 1 of processing a return on any customer's delivered order. Read-only: shows who "
+            "it belongs to, whether it is outside the 30-day window, and what would change. Call "
+            "this FIRST and wait for the staff member to confirm."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order_number": {"type": "string", "description": "e.g. TPJ-123456. NOT a product SKU."},
+                "reason_code": {
+                    "type": "string",
+                    "description": (
+                        "A return code from list_resolution_reasons (kind='return', staff codes "
+                        "included), copied verbatim. Final-sale items can only be returned with "
+                        "'damaged_on_arrival'."
+                    ),
+                },
+                "reason_note": {"type": "string", "description": "Extra detail; required for 'other_return'."},
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Why, in the staff member's own words. Written to the permanent audit log. "
+                        "Ask them if they haven't said."
+                    ),
+                },
+            },
+            "required": ["order_number", "reason", "reason_code"],
+        },
+    },
+    {
+        "name": "admin_return_order",
+        "description": (
+            "STEP 2 — actually returns any customer's delivered order, overriding the 30-day "
+            "window if needed, and puts the items back into stock. Only call after "
+            "admin_preview_order_return in this same conversation AND an explicit yes from the "
+            "staff member in a separate message. Pass the SAME values you previewed; different "
+            "ones are rejected. Does not refund anything — settlement is separate."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order_number": {"type": "string"},
+                "reason_code": {"type": "string", "description": "Must match the code given to the preview."},
+                "reason_note": {"type": "string", "description": "Must match the note given to the preview."},
+                "reason": {"type": "string", "description": "Must match the reason given to the preview, verbatim."},
+            },
+            "required": ["order_number", "reason", "reason_code"],
         },
     },
     {
