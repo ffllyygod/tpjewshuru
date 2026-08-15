@@ -49,6 +49,17 @@ _PERIODS = {
 MAX_ROWS = 50
 
 CATEGORIES = {"ring", "necklace", "earring", "bracelet", "bangle", "pendant"}
+ORDER_STATUSES = {"PLACED", "CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED", "RETURNED"}
+
+
+def _parse_date(value: str, field: str) -> datetime:
+    """Parse a YYYY-MM-DD date, raising a message the model can act on. Bare
+    ValueErrors surface to the model as an opaque 'tool_failed' with a Python
+    traceback string, which it cannot correct from."""
+    try:
+        return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        raise ValueError(f"{field} must be a date in YYYY-MM-DD format, got '{value}'.") from None
 
 
 def _resolve_period(period: str, start_date: str | None, end_date: str | None) -> tuple[datetime, datetime, str]:
@@ -60,8 +71,14 @@ def _resolve_period(period: str, start_date: str | None, end_date: str | None) -
     if period == "custom":
         if not start_date or not end_date:
             raise ValueError("period='custom' requires both start_date and end_date (YYYY-MM-DD).")
-        start = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
-        end = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc) + timedelta(days=1)
+        start = _parse_date(start_date, "start_date")
+        end = _parse_date(end_date, "end_date") + timedelta(days=1)
+        # A reversed range matches nothing and would return a confident zero.
+        # Same failure class as an unrecognised filter value: fail loudly.
+        if end <= start:
+            raise ValueError(
+                f"end_date ({end_date}) must be on or after start_date ({start_date})."
+            )
     elif period == "last_month":
         first_of_this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         end = first_of_this_month
@@ -349,24 +366,43 @@ def admin_inventory_status(
         )
         rows = cur.fetchall()
 
+    # Deliberately NO per-row price. Live testing caught the model repeatedly
+    # summing a price column into an invented "total value" — and getting it
+    # wrong every time. A stock report is about quantities; removing the
+    # summable column removes the temptation structurally, which works where the
+    # prompt rule alone did not. Aggregate value is provided below, computed here.
     out = []
     for r in rows:
-        cents, display = _money(r["price_cents"])
         total = r["total_stock"]
         out.append({
             "sku": r["sku"],
             "name": r["name"],
             "category": r["category"],
-            "price_cents": cents,
-            "price_display": display,
             "total_stock": total,
             "by_size": r["stock_by_size"],
             "low_stock_threshold": r["low_stock_threshold"],
             "status": "OUT_OF_STOCK" if total == 0 else ("LOW" if total <= r["low_stock_threshold"] else "OK"),
         })
 
-    return {"filter": filter, "category": category, "rows": out, "row_count": len(out),
-            "truncated": len(out) >= limit}
+    # Totals are computed HERE, deliberately. Live testing caught the model
+    # appending its own "total value" line to this list — and getting it wrong
+    # (₹72,49,932 for a set actually worth ₹48,60,180). It wants a total, so give
+    # it one it doesn't have to derive. Same principle as the *_display fields.
+    by_sku = {r["sku"]: r["price_cents"] for r in rows}
+    stock_value = sum(by_sku[r["sku"]] * r["total_stock"] for r in out)
+    value_cents, value_display = _money(stock_value)
+    return {
+        "filter": filter,
+        "category": category,
+        "rows": out,
+        "row_count": len(out),
+        "truncated": len(out) >= limit,
+        "out_of_stock_count": sum(1 for r in out if r["status"] == "OUT_OF_STOCK"),
+        "low_stock_count": sum(1 for r in out if r["status"] == "LOW"),
+        "total_units_on_hand": sum(r["total_stock"] for r in out),
+        "remaining_stock_value_cents": value_cents,
+        "remaining_stock_value_display": value_display,
+    }
 
 
 def admin_find_orders(
@@ -382,17 +418,27 @@ def admin_find_orders(
     limit = max(1, min(int(limit or 25), MAX_ROWS))
     clauses, params = [], []
     if status:
+        # Validated here rather than letting Postgres reject the enum cast — that
+        # surfaces to the model as an opaque tool_failed it can't correct from.
+        if status.upper() not in ORDER_STATUSES:
+            return {
+                "error": "bad_status",
+                "message": f"Unknown status '{status}'. Use one of: {', '.join(sorted(ORDER_STATUSES))}.",
+            }
         clauses.append("o.status = %s::order_status")
         params.append(status.upper())
     if customer_email:
         clauses.append("cu.email ILIKE %s")
         params.append(f"%{customer_email}%")
-    if start_date:
-        clauses.append("o.placed_at >= %s")
-        params.append(datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc))
-    if end_date:
-        clauses.append("o.placed_at < %s")
-        params.append(datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc) + timedelta(days=1))
+    try:
+        if start_date:
+            clauses.append("o.placed_at >= %s")
+            params.append(_parse_date(start_date, "start_date"))
+        if end_date:
+            clauses.append("o.placed_at < %s")
+            params.append(_parse_date(end_date, "end_date") + timedelta(days=1))
+    except ValueError as e:
+        return {"error": "bad_date", "message": str(e)}
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
 
@@ -410,9 +456,13 @@ def admin_find_orders(
         )
         rows = cur.fetchall()
 
+    # Per-row amounts are display-only, deliberately. A numeric *_cents column in
+    # a list is an invitation to sum it — live testing caught the model doing
+    # exactly that here, dividing the raw cents by 100 itself and rendering
+    # ₹23,354,395.87 in Western grouping instead of the Indian ₹2,33,54,395.87.
+    # The row total below is computed server-side for it instead.
     out = []
     for r in rows:
-        cents, display = _money(r["total_amount_cents"])
         out.append({
             "order_number": r["order_number"],
             "customer_name": r["customer_name"],
@@ -420,10 +470,18 @@ def admin_find_orders(
             "status": r["status"],
             "payment_status": r["payment_status"],
             "placed_at": r["placed_at"],
-            "total_amount_cents": cents,
-            "total_amount_display": display,
+            "total_amount_display": format_inr(r["total_amount_cents"]),
         })
-    return {"rows": out, "row_count": len(out), "truncated": len(out) >= limit}
+    # Pre-computed for the same reason as admin_inventory_status: the model will
+    # otherwise sum the column itself and get it wrong.
+    _, total_display = _money(sum(r["total_amount_cents"] for r in rows))
+    return {
+        "rows": out,
+        "row_count": len(out),
+        "truncated": len(out) >= limit,
+        "rows_total_display": total_display,
+        "note": "rows_total covers only the rows returned, which may be capped by `limit`.",
+    }
 
 
 def admin_order_detail(actor_customer_id: str, order_number: str) -> dict:
@@ -481,7 +539,6 @@ def admin_order_detail(actor_customer_id: str, order_number: str) -> dict:
         "items": [
             {
                 "name": i["name"], "sku": i["sku"], "quantity": i["quantity"], "size": i["size"],
-                "unit_price_cents": i["unit_price_cents"],
                 "unit_price_display": format_inr(i["unit_price_cents"]),
             }
             for i in items
@@ -497,8 +554,15 @@ def admin_find_customer(actor_customer_id: str, query: str, limit: int = 10) -> 
     """Find customers by name, email or phone. Phone is masked — a search should
     not be a bulk contact-details export; admin_customer_profile gives the full
     record for one named person."""
+    # An empty query would ILIKE '%%' and return an arbitrary slice of the
+    # customer base — a bulk PII dump triggered by the model passing "".
+    if not query or not query.strip():
+        return {
+            "error": "empty_query",
+            "message": "Provide a name, email, or phone fragment to search for.",
+        }
     limit = max(1, min(int(limit or 10), 25))
-    like = f"%{query}%"
+    like = f"%{query.strip()}%"
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             f"""
@@ -598,7 +662,6 @@ def admin_customer_profile(actor_customer_id: str, customer_email: str) -> dict:
             {
                 "order_number": o["order_number"], "status": o["status"], "placed_at": o["placed_at"],
                 "payment_status": o["payment_status"],
-                "total_amount_cents": o["total_amount_cents"],
                 "total_amount_display": format_inr(o["total_amount_cents"]),
             }
             for o in orders
@@ -606,8 +669,8 @@ def admin_customer_profile(actor_customer_id: str, customer_email: str) -> dict:
         "coupons": [
             {
                 "code": c["code"], "status": c["status"],
-                "total_cents": c["total_cents"], "total_display": format_inr(c["total_cents"]),
-                "remaining_cents": c["remaining_cents"], "remaining_display": format_inr(c["remaining_cents"]),
+                "total_display": format_inr(c["total_cents"]),
+                "remaining_display": format_inr(c["remaining_cents"]),
                 "expires_at": c["expires_at"],
             }
             for c in coupons
@@ -616,9 +679,7 @@ def admin_customer_profile(actor_customer_id: str, customer_email: str) -> dict:
             {
                 "subscription_code": s["code"], "status": s["status"],
                 "installments_paid": s["installments_paid"], "tenure_months": s["tenure_months"],
-                "monthly_amount_cents": s["monthly_amount_cents"],
                 "monthly_amount_display": format_inr(s["monthly_amount_cents"]),
-                "total_paid_cents": s["total_paid_cents"],
                 "total_paid_display": format_inr(s["total_paid_cents"]),
             }
             for s in sips

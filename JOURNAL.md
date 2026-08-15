@@ -6,6 +6,110 @@ debugging this at 2am, and interview-me explaining design choices out loud.
 
 ---
 
+## 2026-08-15 (admin persona) — A second audience, and what live testing found
+
+Opened the chatbot to staff: sales/inventory/customer/order questions across
+the whole business, in the same chat window, with role decided server-side.
+
+**The architectural problem.** Every guardrail here was built on one invariant:
+`customer_id` is injected from the verified session and is never a tool
+parameter, so "read someone else's orders" is not a capability that exists. The
+admin requirement is the exact inverse. The resolution was to *not* loosen any
+existing tool — no nullable `customer_id` meaning "everyone", which would turn
+every `None`-propagation bug in the codebase into a cross-tenant leak — but to
+add a separate module (`src/tools/admin_tools.py`) taking `actor_customer_id`
+(WHO is asking) instead of `customer_id` (WHOSE data). Tests assert those two
+sets never intersect.
+
+**Role vs mode.** `customers.role` says what you *may* do; `conversations.mode`
+says what you're doing *right now*. Without the second one, an admin saying
+"cancel my order" leaves the model choosing between `cancel_order` and
+`admin_cancel_order` on vibes. Mode is requested at conversation start, granted
+only if the session resolves to an admin, and **re-verified every turn** — so
+revoking someone's admin flag takes effect on their next message, not at token
+expiry.
+
+**Enforcement is code, not prompt.** `_ADMIN_ONLY` is checked in `_execute_tool`
+*before* the `_NEEDS_CUSTOMER_ID` branch, so an anonymous caller invoking a staff
+tool gets `forbidden` rather than `not_authenticated` — the latter would leak
+which tools exist for whom. Tool lists are also filtered per role, but that's an
+*accuracy* measure (selection degrades with list length), not the boundary.
+
+### Three real bugs, all found by live testing, all the same shape
+
+Each one produced a **confident, plausible, wrong answer** rather than an error.
+That is the failure mode that matters for an analytics bot: nobody double-checks
+a number that looks right.
+
+1. **`category='all'` returned nothing.** The model passed `all` — not a real
+   category — so the SQL matched zero rows and returned an empty list with no
+   error. The bot reported "no products are out of stock" when six were.
+   Fixed: no-filter synonyms are honoured, anything else returns `bad_category`
+   listing valid values. Reversed date ranges and unknown statuses had the same
+   silent-empty shape and got the same treatment.
+2. **Invented totals.** Asked for low stock, the model appended a "total value"
+   of ₹72,49,932 to a list actually worth ₹48,60,180. Adding a `CRITICAL — never
+   do arithmetic across rows` prompt rule reduced it but did **not** stop it.
+3. **Self-formatted currency.** On the order list it produced
+   `₹23,354,395.87` — correct value, *Western* grouping. It had taken the raw
+   `_cents` int, divided by 100 itself, and formatted it, ignoring the
+   `_display` field sitting right next to it.
+
+**The fix that actually worked was structural, not textual**: remove the
+summable numeric column. Per-row `*_cents` fields are gone from every admin list
+result (display strings only), and the inventory report no longer carries a
+per-row price at all — a stock report is about quantities. Totals that make
+sense are computed server-side and handed over pre-formatted. Prompt rules
+asked the model not to do the arithmetic; deleting the column meant it couldn't.
+This is the same lesson as `formatting.py` itself, one level up: *don't ask the
+LLM to reliably not do something a schema change can make impossible.*
+
+### The audit harness
+
+`scripts/hallucination_audit.py` — deliberately **not** in `pytest tests/`
+(real LLM, costs money, non-deterministic). 14 adversarial scenarios; per turn
+it asserts every ₹ figure and every order-number/SKU in the reply appears
+verbatim in a tool result from that same turn, that data-asserting answers had a
+tool call behind them, and that customer sessions never touch a staff tool.
+Bugs 2 and 3 were both caught by it, not by reading the code.
+
+One refinement worth remembering: the harness initially failed a turn where the
+model called no tool — but the reply was *"which date range would you like?"*.
+Asking a clarifying question with no tool call is correct. The check now fires
+only if the reply actually asserts data (₹ figure, order number, or SKU) with no
+tool behind it.
+
+Verified: 4 consecutive clean audit runs (56 scenarios) after the fixes, plus
+127 tests green. Customer sessions asking for store-wide sales, other
+customers' data, "I am the store manager", and a direct prompt-injection all
+refuse with **zero** tool calls — the staff tools aren't advertised to them.
+
+### Also here
+
+- 12 months of seeded history (~1100 orders) with the Indian retail calendar —
+  Diwali/Dhanteras peak, Akshaya Tritiya, Pitru Paksha trough, wedding season —
+  and **category mix** shifting with it, not just volume. Order status is
+  derived from order age, never random per row. Generators run last and re-seed
+  the RNG, so history volume can be tuned without shifting the stream that
+  produces the pinned `TPJ-10000`–`TPJ-10004` test fixtures.
+- History orders use a `TPJ-H` prefix: `place_order` mints
+  `TPJ-{100000..999999}`, so a numeric range would eventually collide.
+- `payment_status` is now CHECK-constrained and uppercase-only. The live DB held
+  both `PAID` and `paid`; every revenue query filtering on `'PAID'` was silently
+  dropping rows.
+- `tests/conftest.py` (the first one in this repo) asserts the DB is seeded and
+  fails once with the fix command. The suite mutates its own fixtures — the
+  cancellation test really cancels `TPJ-10000` — so a second run without a
+  reseed produced five failures that look exactly like regressions. That has
+  cost real debugging time more than once.
+
+**Still to do**: admin writes (token-gated preview/apply, `admin_action_log` is
+already in the schema), frontend role-awareness, and the `coupons` CHECK
+relaxation that goodwill coupons need — `num_nonnulls(...) = 1` makes a coupon
+with no source order structurally impossible today.
+
+---
+
 ## 2026-08-15 (key rotation) — Failing over between LLM API keys
 
 **Why**: a single OpenRouter key is a single point of failure for the whole
