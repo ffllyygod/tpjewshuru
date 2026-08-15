@@ -6,6 +6,59 @@ debugging this at 2am, and interview-me explaining design choices out loud.
 
 ---
 
+## 2026-08-15 (deployed, continued) — Attaching the Postgres volume: three real problems, in sequence
+
+The `railway volume add` CLI command panics (`Option::unwrap() on a None
+value`, `src\commands\volume.rs:836`) on the latest CLI (5.41.2) — confirmed
+reproducible, not a fluke, tried twice. Worked around it via Railway's
+declarative config tool instead (`npm install railway`, `railway config
+pull/plan/apply`, editing `.railway/railway.ts`) — a real, working path, but
+under-documented enough that it took real trial and error to find the
+correct shape:
+- A plain inline `{ mountPath: "..." }` in `volumeMounts` was silently a
+  no-op (`plan` showed "0 to add" — no volume actually gets created that
+  way).
+- Referencing an explicit `volume("postgres-data")` node worked, **but**
+  the mount path came from the `volumeMounts` record's **key**, not from a
+  `mountPath` field on the value — `{ "postgres-data": volumeNode }` mounts
+  at literally `/postgres-data`; the correct form is
+  `{ "/var/lib/postgresql/data": volumeNode }` (path as the key). Confirmed
+  via `railway config plan`'s diff output before ever applying anything to
+  the live service.
+
+**Before applying anything to the live database service**, took a full
+`pg_dump -F c` backup via the local machine (same Postgres image's `pg_dump`
+client, pointed at the TCP proxy) — a live production DB was about to be
+reconfigured based on reverse-engineered, undocumented SDK behavior, so
+"trust the diff and hope" wasn't good enough here.
+
+Good thing: attaching the volume **crashed Postgres** — the official image's
+`initdb` refuses to run directly on a mount-point root that already has a
+`lost+found` directory (standard for a freshly-formatted volume), so it
+never overwrote anything; it just failed closed. Fixed by setting
+`PGDATA=/var/lib/postgresql/data/pgdata` (a subdirectory of the mount, per
+the initdb hint text) and redeploying. This is standard practice for this
+image on any platform, not Railway-specific — the earlier config just didn't
+account for it. Once initialized, the volume was **correctly empty** (new
+persistent disk, no relation to the old ephemeral one) — restored the
+pre-change backup via `pg_restore --no-owner --no-privileges`, verified the
+exact rows that mattered (`TPJ-668172`, `TPJ-DEMO01` CANCELLED,
+`TPJ-CPN-1ZCDNCBPCG` remaining ₹32,500) were back byte-for-byte.
+
+One more problem after that: the `api` service's connection pool held
+connections opened *before* Postgres restarted for the volume attach — those
+were now dead (`psycopg.errors.AdminShutdown`), causing `/conversations` and
+`/chat` to 500 even though Postgres itself was healthy again. Fixed with a
+plain `railway redeploy -s api` (fresh pool, no data impact — same "backend
+redeploy never touches the DB" fact established earlier in this doc).
+
+Live-reverified the full stack afterward: real chat request, correct order
+list, correct coupon balance, against Postgres now on a genuinely persistent
+volume. Total real problems hit in this one dashboard-avoiding detour: a CLI
+panic, wrong mount-path syntax discovered only by reading the plan diff, an
+`initdb`-on-mount-point crash, and a stale-connection-pool 500 — every one
+diagnosed from actual logs/output, not guessed at.
+
 ## 2026-08-15 (deployed, continued) — The currency-arithmetic bug recurred in production, fixed at the root
 
 Flagged as an unresolved residual risk in the Gold SIP journal entry

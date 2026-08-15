@@ -14,5 +14,8 @@ web/.env.local
 web/*.tsbuildinfo
 web/next-env.d.ts
 
+# Railway TypeScript SDK (used once for declarative volume config — see JOURNAL.md)
+node_modules/
+
 # OS / editor
 .DS_Store
