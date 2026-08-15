@@ -158,7 +158,10 @@ def main():
         insert_order(conn, customer_id, "TPJ-DEMO01", "PLACED", placed_hours_ago=3, product=products[0], size="7")
         insert_order(conn, customer_id, "TPJ-DEMO02", "SHIPPED", placed_hours_ago=72, product=products[1])
 
-    print("\nDone. Chat as this user via POST /conversations {\"email\": \"" + DEMO_EMAIL + "\"}")
+    print("\nDone. Log in as this user with OTP-over-email: enter " + DEMO_EMAIL
+          + " on the web login screen (or POST /auth/signinup/code {\"email\": ...},"
+          " then /auth/signinup/code/consume). /conversations no longer accepts a"
+          " client-supplied email — identity comes from the verified session only.")
 
 
 if __name__ == "__main__":

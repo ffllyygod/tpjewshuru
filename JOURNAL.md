@@ -65,10 +65,36 @@ all. 10 new unit tests in `tests/test_auth.py` cover the customer-existence
 gate and the ownership check with fakes (no live SuperTokens instance
 needed for these); full suite (53 tests) passes clean after a DB reset.
 
-**Not yet done**: frontend login UI, Railway deployment of the SuperTokens
-service + prod SMTP env vars, live verification against the deployed
-frontend. `docker-compose.yml` and `.env.example` are updated for local dev;
-`requirements.txt` now pins `supertokens-python>=0.31.3`.
+**Railway blocks outbound SMTP.** The paragraphs above were written
+mid-work, when the plan was still "Gmail SMTP everywhere". That died on
+deploy: the SuperTokens SMTP path times out in production with
+`SMTPConnectTimeoutError` on 25/465/587 — Railway blocks outbound SMTP at
+the network level. Confirmed live, not guessed. Fix: `ResendEmailService`
+in `src/api/auth.py`, a `EmailDeliveryInterface` implementation that posts
+to Resend's HTTP API on 443 instead. It reuses SuperTokens' own default OTP
+template (`pless_email_content`), so the email is byte-identical to the
+local SMTP path — **only the transport differs**. `_build_email_service()`
+picks Resend when `RESEND_API_KEY`/`RESEND_FROM` are set (production) and
+falls back to Gmail SMTP otherwise (local dev, where nothing is blocked).
+Worth remembering as a general fact about PaaS hosts, not a Railway quirk:
+several block SMTP to limit spam, and an HTTP email API is the way out.
+
+**One more real deploy bug, found live**: a stray root `package.json` — left
+behind by the Railway CLI declarative-config tool used for the volume work
+in the previous entry — made Nixpacks detect the backend as a *Node* app and
+build it as one. Fixed with `nixpacks.toml` + `.railwayignore` pinning the
+Python builder.
+
+**Done and live**: frontend login UI shipped as a two-step OTP screen
+(`web/src/components/LoginScreen.tsx`), talking to SuperTokens' REST
+endpoints directly rather than mounting the `supertokens-auth-react` widget,
+so the existing dark/gold design survives. SuperTokens core is deployed as
+its own Railway service. Verified end-to-end **in production**: real OTP
+delivered via Resend, code consumed, session issued, `/conversations`
+resolves the real customer, `/chat` enforces ownership, anonymous browsing
+still works, CORS confirmed from the live Vercel origin. `docker-compose.yml`
+and `.env.example` are updated for local dev; `requirements.txt` pins
+`supertokens-python>=0.31.3`.
 
 ---
 
