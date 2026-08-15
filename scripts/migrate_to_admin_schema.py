@@ -153,6 +153,41 @@ STEPS: list[tuple[str, str]] = [
         """,
     ),
     (
+        "customers — marketing consent",
+        # Defaults to true, matching an existing-customer relationship. The
+        # opt-out is enforced inside the signal queries themselves, not by a
+        # filter each caller has to remember.
+        """
+        ALTER TABLE customers
+          ADD COLUMN IF NOT EXISTS marketing_opt_in       BOOLEAN NOT NULL DEFAULT true,
+          ADD COLUMN IF NOT EXISTS marketing_opted_out_at TIMESTAMPTZ;
+        """,
+    ),
+    (
+        "outreach_drafts — proactive messages awaiting review",
+        """
+        CREATE TABLE IF NOT EXISTS outreach_drafts (
+          id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          customer_id     UUID NOT NULL REFERENCES customers(id),
+          signal_type     TEXT NOT NULL,
+          signal_key      TEXT NOT NULL,
+          facts           JSONB NOT NULL,
+          draft_message   TEXT NOT NULL,
+          status          TEXT NOT NULL DEFAULT 'DRAFT'
+                          CHECK (status IN ('DRAFT', 'APPROVED', 'SENT', 'DISMISSED')),
+          created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+          reviewed_by     UUID REFERENCES customers(id),
+          reviewed_at     TIMESTAMPTZ,
+          dismiss_reason  TEXT,
+          UNIQUE (customer_id, signal_key)
+        );
+        CREATE INDEX IF NOT EXISTS outreach_drafts_status_idx
+          ON outreach_drafts(status, created_at DESC);
+        CREATE INDEX IF NOT EXISTS outreach_drafts_customer_idx
+          ON outreach_drafts(customer_id, created_at DESC);
+        """,
+    ),
+    (
         "orders — resolution reason columns",
         """
         ALTER TABLE orders

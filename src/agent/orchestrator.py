@@ -38,7 +38,7 @@ from psycopg.rows import dict_row
 from src.agent.system_prompt import prompt_for
 from src.agent.tool_schemas import ADMIN_TOOLS, TOOLS
 from src.db.connection import get_conn
-from src.tools import admin_tools, coupon_tools, gold_sip_tools, knowledge_tools, market_tools, order_tools, product_tools, purchase_tools
+from src.tools import admin_tools, coupon_tools, outreach_tools, gold_sip_tools, knowledge_tools, market_tools, order_tools, product_tools, purchase_tools
 
 LLM_MODEL = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
@@ -103,6 +103,7 @@ _TOOL_IMPL = {
     "check_cancellation_eligibility": order_tools.check_cancellation_eligibility,
     "cancel_order": order_tools.cancel_order,
     "list_resolution_reasons": order_tools.list_resolution_reasons,
+    "set_marketing_preference": outreach_tools.set_marketing_preference,
     "check_return_eligibility": order_tools.check_return_eligibility,
     "request_return": order_tools.request_return,
     "search_knowledge": knowledge_tools.search_knowledge,
@@ -132,6 +133,10 @@ _TOOL_IMPL = {
     "admin_customer_profile": admin_tools.admin_customer_profile,
     "admin_bot_stats": admin_tools.admin_bot_stats,
     "admin_resolution_reasons": admin_tools.admin_resolution_reasons,
+    "admin_outreach_queue": admin_tools.admin_outreach_queue,
+    "admin_preview_outreach_approval": admin_tools.admin_preview_outreach_approval,
+    "admin_approve_outreach": admin_tools.admin_approve_outreach,
+    "admin_dismiss_outreach": admin_tools.admin_dismiss_outreach,
     "admin_preview_order_return": admin_tools.admin_preview_order_return,
     "admin_return_order": admin_tools.admin_return_order,
     # Staff writes — each preview mints a confirmation the matching apply
@@ -145,7 +150,7 @@ _TOOL_IMPL = {
 }
 _NEEDS_CUSTOMER_ID = {
     "list_customer_orders", "get_order_status", "check_cancellation_eligibility", "cancel_order",
-    "check_return_eligibility", "request_return",
+    "check_return_eligibility", "request_return", "set_marketing_preference",
     "offer_settlement_options", "issue_coupon", "request_cash_refund", "get_my_coupons",
     "redeem_coupon", "place_order",
     "start_gold_sip", "pay_sip_installment", "get_my_gold_sips", "cancel_gold_sip", "redeem_gold_sip",
@@ -161,6 +166,7 @@ _NEEDS_CONVERSATION_ID = {
     "admin_preview_stock_adjustment", "admin_adjust_stock",
     "admin_preview_goodwill_coupon", "admin_issue_goodwill_coupon",
     "admin_preview_order_return", "admin_return_order",
+    "admin_preview_outreach_approval", "admin_approve_outreach", "admin_dismiss_outreach",
 }
 
 # Staff-only tools. Populated as admin tools land; the gate below is already
@@ -183,7 +189,7 @@ _ADMIN_EXCLUDED_FROM_CUSTOMER = _ADMIN_ONLY
 # about "my orders" should start a normal customer conversation.
 _CUSTOMER_ONLY = {
     "list_customer_orders", "get_order_status", "check_cancellation_eligibility", "cancel_order",
-    "check_return_eligibility", "request_return",
+    "check_return_eligibility", "request_return", "set_marketing_preference",
     "offer_settlement_options", "issue_coupon", "request_cash_refund", "get_my_coupons",
     "redeem_coupon", "place_order",
     "start_gold_sip", "pay_sip_installment", "get_my_gold_sips", "cancel_gold_sip", "redeem_gold_sip",

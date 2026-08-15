@@ -32,6 +32,7 @@ from psycopg.rows import dict_row
 from src.db.connection import get_conn
 from src.tools.coupon_tools import get_policy, mint_coupon
 from src.tools.formatting import format_inr
+from src.tools import outreach_tools
 from src.tools.order_tools import RETURN_WINDOW_DAYS, _restock_order_items, resolve_reason
 
 # Revenue always excludes cancelled and returned orders, and is always net of
@@ -1717,4 +1718,266 @@ def admin_return_order(
             f"Order {order['order_number']} ({order['customer_name']}) is returned, stock is back, "
             "and the action is logged against your account. No money has moved — settlement is separate."
         ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Outreach review — staff read + the approve/dismiss pair
+# ---------------------------------------------------------------------------
+
+
+def admin_outreach_queue(
+    actor_customer_id: str, status: str = "DRAFT", signal_type: str | None = None, limit: int = 15,
+) -> dict:
+    """Proactive messages waiting for review, newest first.
+
+    Read-only. Returns the drafted text and the facts it was generated from, so
+    a reviewer can check the claim against the data without leaving the chat.
+    """
+    status = (status or "DRAFT").upper()
+    if status not in ("DRAFT", "APPROVED", "SENT", "DISMISSED", "ALL"):
+        return {
+            "error": "bad_status",
+            "message": "status must be one of: DRAFT, APPROVED, SENT, DISMISSED, ALL.",
+        }
+    if signal_type and signal_type not in outreach_tools.SIGNAL_TYPES:
+        return {
+            "error": "bad_signal_type",
+            "message": f"Unknown signal_type. Use one of: {', '.join(outreach_tools.SIGNAL_TYPES)}.",
+        }
+    limit = max(1, min(int(limit or 15), MAX_ROWS))
+
+    clauses, params = [], []
+    if status != "ALL":
+        clauses.append("od.status = %s")
+        params.append(status)
+    if signal_type:
+        clauses.append("od.signal_type = %s")
+        params.append(signal_type)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""
+            SELECT od.id, od.signal_type, od.signal_key, od.status, od.facts,
+                   od.draft_message, od.created_at, cu.name AS customer_name, cu.email
+            FROM outreach_drafts od JOIN customers cu ON cu.id = od.customer_id
+            {where}
+            ORDER BY od.created_at DESC
+            LIMIT %s
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT status, signal_type, count(*) AS n FROM outreach_drafts
+            GROUP BY 1, 2 ORDER BY 1, 3 DESC
+            """
+        )
+        totals = cur.fetchall()
+
+    return {
+        "status_filter": status,
+        "rows": [
+            {
+                "draft_id": str(r["id"]),
+                "customer_name": r["customer_name"],
+                "customer_email": r["email"],
+                "signal_type": r["signal_type"],
+                "status": r["status"],
+                "message": r["draft_message"],
+                # The facts are included deliberately: "is this claim true?" is
+                # the only question that matters at review time, and it should
+                # be answerable without a second tool call.
+                "generated_from": r["facts"],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ],
+        "row_count": len(rows),
+        "queue_summary": [
+            {"status": t["status"], "signal_type": t["signal_type"], "count": t["n"]} for t in totals
+        ],
+        "note": (
+            "Nothing here has been sent. Every message needs explicit approval — read it to the "
+            "staff member and check it against generated_from before approving."
+        ),
+    }
+
+
+def _load_draft(cur, draft_id: str):
+    cur.execute(
+        """
+        SELECT od.id, od.status, od.signal_type, od.draft_message, od.facts,
+               od.customer_id, cu.name AS customer_name, cu.email, cu.marketing_opt_in
+        FROM outreach_drafts od JOIN customers cu ON cu.id = od.customer_id
+        WHERE od.id::text = %s
+        """,
+        (str(draft_id),),
+    )
+    return cur.fetchone()
+
+
+def admin_preview_outreach_approval(
+    actor_customer_id: str, draft_id: str, reason: str, conversation_id: str,
+) -> dict:
+    """STEP 1 of approving a drafted message. Shows exactly what would be sent,
+    to whom, and what it was generated from. Changes nothing."""
+    try:
+        reason = _clean_reason(reason)
+    except ValueError as e:
+        return {"error": "reason_required", "message": str(e)}
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        # id::text comparison, so a malformed id simply matches nothing rather
+        # than raising — "no such draft" is the honest answer either way.
+        draft = _load_draft(cur, draft_id)
+        if not draft:
+            return {"error": "not_found", "message": f"No outreach draft {draft_id}."}
+        if draft["status"] != "DRAFT":
+            return {
+                "error": "already_reviewed",
+                "message": f"This draft is already {draft['status']} — it can't be approved again.",
+            }
+        if not draft["marketing_opt_in"]:
+            # Consent can be withdrawn between drafting and review.
+            return {
+                "error": "opted_out",
+                "message": (
+                    f"{draft['customer_name']} has since opted out of proactive messages. "
+                    "Dismiss this draft rather than approving it."
+                ),
+            }
+
+        _mint_token(cur, conversation_id, "admin_approve_outreach", draft["id"], {"reason": reason})
+        conn.commit()
+
+    return {
+        "preview": True,
+        "draft_id": str(draft["id"]),
+        "customer_name": draft["customer_name"],
+        "customer_email": draft["email"],
+        "signal_type": draft["signal_type"],
+        "message_to_send": draft["draft_message"],
+        "generated_from": draft["facts"],
+        "reason": reason,
+        "will_change": [
+            f"The message above is approved for sending to {draft['customer_name']}",
+            "An audit entry recording you as the approver and this reason",
+        ],
+        "check_before_approving": (
+            "Read the message out and confirm every claim in it appears in generated_from. "
+            "This goes to a real customer who did not ask for it."
+        ),
+        "confirmation_expires_in_minutes": ADMIN_TOKEN_TTL_MINUTES,
+        "next_step": "Only call admin_approve_outreach after the staff member explicitly says yes.",
+    }
+
+
+def admin_approve_outreach(
+    actor_customer_id: str, draft_id: str, reason: str, conversation_id: str,
+) -> dict:
+    """STEP 2 — approve a drafted message for sending. Requires a matching
+    admin_preview_outreach_approval in this conversation.
+
+    There is no real delivery channel wired up (same as the payment gateway),
+    so this records the decision and marks the draft APPROVED. Whatever sends
+    email later reads this table.
+    """
+    try:
+        reason = _clean_reason(reason)
+    except ValueError as e:
+        return {"applied": False, "reason": "reason_required", "message": str(e)}
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        draft = _load_draft(cur, draft_id)
+        if not draft:
+            return {"applied": False, "reason": "not_found", "message": f"No outreach draft {draft_id}."}
+
+        token_id, err = _claim_token(
+            cur, conversation_id, "admin_approve_outreach", draft["id"], {"reason": reason},
+        )
+        if err:
+            return err
+
+        # Re-validated from scratch: status and consent may both have moved
+        # between the preview and now.
+        if draft["status"] != "DRAFT":
+            return {"applied": False, "reason": "already_reviewed", "message": f"Draft is now {draft['status']}."}
+        if not draft["marketing_opt_in"]:
+            return {
+                "applied": False,
+                "reason": "opted_out",
+                "message": f"{draft['customer_name']} has opted out since the preview — not approving.",
+            }
+
+        cur.execute(
+            """
+            UPDATE outreach_drafts
+            SET status = 'APPROVED', reviewed_by = %s, reviewed_at = now()
+            WHERE id = %s
+            """,
+            (actor_customer_id, draft["id"]),
+        )
+        cur.execute("UPDATE confirmation_tokens SET used_at = now() WHERE id = %s", (token_id,))
+        _log_admin_action(
+            cur, actor_customer_id, conversation_id, "admin_approve_outreach",
+            "outreach_drafts", draft["id"],
+            {"status": "DRAFT"},
+            {"status": "APPROVED", "customer_email": draft["email"], "message": draft["draft_message"]},
+            reason,
+        )
+        conn.commit()
+
+    return {
+        "applied": True,
+        "draft_id": str(draft["id"]),
+        "customer_name": draft["customer_name"],
+        "status": "APPROVED",
+        "reason": reason,
+        "message": (
+            f"Approved for {draft['customer_name']}. Recorded against your account — no email has "
+            "actually been dispatched, as there's no delivery channel wired up in this build."
+        ),
+    }
+
+
+def admin_dismiss_outreach(actor_customer_id: str, draft_id: str, reason: str, conversation_id: str) -> dict:
+    """Discard a drafted message. Single-step on purpose: dismissing is the
+    safe direction, and putting a confirmation in front of "don't send this"
+    would make the careful choice the slower one."""
+    try:
+        reason = _clean_reason(reason)
+    except ValueError as e:
+        return {"applied": False, "reason": "reason_required", "message": str(e)}
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        draft = _load_draft(cur, draft_id)
+        if not draft:
+            return {"applied": False, "reason": "not_found", "message": f"No outreach draft {draft_id}."}
+        if draft["status"] not in ("DRAFT", "APPROVED"):
+            return {"applied": False, "reason": "already_reviewed", "message": f"Draft is already {draft['status']}."}
+
+        cur.execute(
+            """
+            UPDATE outreach_drafts
+            SET status = 'DISMISSED', reviewed_by = %s, reviewed_at = now(), dismiss_reason = %s
+            WHERE id = %s
+            """,
+            (actor_customer_id, reason, draft["id"]),
+        )
+        _log_admin_action(
+            cur, actor_customer_id, conversation_id, "admin_dismiss_outreach",
+            "outreach_drafts", draft["id"], {"status": draft["status"]}, {"status": "DISMISSED"}, reason,
+        )
+        conn.commit()
+
+    return {
+        "applied": True,
+        "draft_id": str(draft["id"]),
+        "status": "DISMISSED",
+        "message": f"Dismissed. {draft['customer_name']} will not receive this message.",
     }

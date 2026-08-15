@@ -218,6 +218,22 @@ TOOLS = [
         },
     },
     {
+        "name": "set_marketing_preference",
+        "description": (
+            "Turn proactive messages (occasional notes about expiring credit, a maturing Gold SIP, "
+            "or an upcoming festival) on or off for this customer. Call this when they ask to stop "
+            "receiving messages, unsubscribe, or ask to hear from us again. Act on the request "
+            "immediately — do not try to talk them out of it or ask why."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "opt_in": {"type": "boolean", "description": "false to stop messages, true to resume."},
+            },
+            "required": ["opt_in"],
+        },
+    },
+    {
         "name": "search_products",
         "description": "Browse/recommend products from the catalog by category, metal, stone, and/or price range. Use this when the customer wants suggestions or is browsing (e.g. 'show me rings under ₹2,00,000', 'gold necklaces with diamonds').",
         "input_schema": {
@@ -553,6 +569,73 @@ ADMIN_TOOLS = [
                 "reason": {"type": "string", "description": "Must match the reason given to the preview, verbatim."},
             },
             "required": ["order_number", "reason", "reason_code"],
+        },
+    },
+    {
+        "name": "admin_outreach_queue",
+        "description": (
+            "Proactive outreach messages drafted for customers, awaiting review. Use for 'what's in "
+            "the outreach queue', 'any messages to approve', 'show me drafted messages'. Returns "
+            "each message AND the facts it was generated from, so the claims can be checked. "
+            "Nothing in the queue has been sent."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["DRAFT", "APPROVED", "SENT", "DISMISSED", "ALL"]},
+                "signal_type": {
+                    "type": "string",
+                    "enum": ["purchase_anniversary", "coupon_expiring", "sip_maturing", "dormant_vip", "festival"],
+                },
+                "limit": {"type": "integer"},
+            },
+        },
+    },
+    {
+        "name": "admin_preview_outreach_approval",
+        "description": (
+            "STEP 1 of approving a drafted outreach message. Read-only: shows the exact text, who "
+            "it goes to, and the facts behind it. Read the message aloud to the staff member and "
+            "check its claims against generated_from before asking them to confirm."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "draft_id": {"type": "string", "description": "The draft_id from admin_outreach_queue."},
+                "reason": {"type": "string", "description": "Why this is being approved. Written to the audit log."},
+            },
+            "required": ["draft_id", "reason"],
+        },
+    },
+    {
+        "name": "admin_approve_outreach",
+        "description": (
+            "STEP 2 — approve a drafted message for sending to a real customer. Only call after "
+            "admin_preview_outreach_approval in this conversation AND an explicit yes from the "
+            "staff member in a separate message."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "draft_id": {"type": "string"},
+                "reason": {"type": "string", "description": "Must match the reason given to the preview."},
+            },
+            "required": ["draft_id", "reason"],
+        },
+    },
+    {
+        "name": "admin_dismiss_outreach",
+        "description": (
+            "Discard a drafted outreach message so it is never sent. Single-step — no preview "
+            "needed, because not sending is always the safe direction."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "draft_id": {"type": "string"},
+                "reason": {"type": "string", "description": "Why it's being dismissed. Written to the audit log."},
+            },
+            "required": ["draft_id", "reason"],
         },
     },
     {

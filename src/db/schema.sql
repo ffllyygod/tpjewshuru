@@ -24,6 +24,13 @@ CREATE TABLE customers (
   email       TEXT NOT NULL UNIQUE,
   phone       TEXT,
   role        TEXT NOT NULL DEFAULT 'customer' CHECK (role IN ('customer', 'admin')),
+  -- Proactive outreach is marketing, and marketing to someone who didn't ask
+  -- is a consent question before it is a product question. Defaulting to true
+  -- matches an existing-customer relationship; the opt-out is honoured by the
+  -- signal queries themselves (src/tools/outreach_tools.py), not by a filter
+  -- someone has to remember to apply.
+  marketing_opt_in       BOOLEAN NOT NULL DEFAULT true,
+  marketing_opted_out_at TIMESTAMPTZ,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -288,6 +295,47 @@ CREATE TABLE admin_action_log (
 
 CREATE INDEX admin_action_log_target_idx ON admin_action_log(target_table, target_id);
 CREATE INDEX admin_action_log_actor_idx ON admin_action_log(actor_customer_id, created_at DESC);
+
+-- ============================================================
+-- Proactive outreach — the store starting a conversation, rather than only
+-- answering one. See src/tools/outreach_tools.py.
+-- ============================================================
+
+-- A drafted nudge to one customer, awaiting staff review.
+--
+-- Nothing here is sent automatically, by design. An LLM writing marketing copy
+-- straight to a real customer's inbox is the one place in this system where a
+-- bad generation reaches a person who never asked for it and can't correct it
+-- in the moment — so a human approves every message, and the same
+-- preview/apply shape as every other write applies.
+--
+-- `facts` is the whole point of the table: the signal is detected in
+-- deterministic SQL, and those verified facts are the ONLY thing the model is
+-- given. The generated prose is then checked back against them, so a draft
+-- can't quote a figure, order number or SKU it wasn't handed. Same principle
+-- as the *_display currency convention — the model writes the sentence, it
+-- does not decide the facts.
+CREATE TABLE outreach_drafts (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  customer_id     UUID NOT NULL REFERENCES customers(id),
+  signal_type     TEXT NOT NULL,   -- 'purchase_anniversary' | 'coupon_expiring' | ...
+  -- Identifies the specific occurrence, e.g. 'purchase_anniversary:TPJ-123456'.
+  -- The UNIQUE below is what stops a nightly job re-drafting the same nudge
+  -- every night for a month — application logic would eventually miss a path.
+  signal_key      TEXT NOT NULL,
+  facts           JSONB NOT NULL,
+  draft_message   TEXT NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'DRAFT'
+                  CHECK (status IN ('DRAFT', 'APPROVED', 'SENT', 'DISMISSED')),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reviewed_by     UUID REFERENCES customers(id),
+  reviewed_at     TIMESTAMPTZ,
+  dismiss_reason  TEXT,
+  UNIQUE (customer_id, signal_key)
+);
+
+CREATE INDEX outreach_drafts_status_idx ON outreach_drafts(status, created_at DESC);
+CREATE INDEX outreach_drafts_customer_idx ON outreach_drafts(customer_id, created_at DESC);
 
 -- ============================================================
 -- Coupons — instant store-credit alternative to a cash refund on
