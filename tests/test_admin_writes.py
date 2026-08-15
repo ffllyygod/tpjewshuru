@@ -127,6 +127,10 @@ def _audit_rows(action: str, target_id: str) -> list[dict]:
 
 
 REASON = "test: customer called about a sizing mistake"
+# Structured code alongside the free text: the code is what makes cancellations
+# reportable, the free text is what goes in the audit log.
+REASON_CODE = "customer_offline"
+RETURN_CODE = "wrong_item_sent"
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +139,7 @@ REASON = "test: customer called about a sizing mistake"
 
 
 def test_cancel_without_preview_is_refused(actor, conversation, order):
-    result = admin_tools.admin_cancel_order(actor, order, REASON, conversation)
+    result = admin_tools.admin_cancel_order(actor, order, REASON, conversation, REASON_CODE)
     assert result["applied"] is False
     assert result["reason"] == "no_pending_confirmation"
     assert _order_status(order) == "PLACED"
@@ -161,7 +165,7 @@ def test_preview_alone_changes_nothing(actor, conversation, order, product, cust
     the tool the model is expected to call speculatively."""
     stock_before = _stock(product["sku"])
 
-    assert admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation)["preview"] is True
+    assert admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation, REASON_CODE)["preview"] is True
     assert admin_tools.admin_preview_stock_adjustment(actor, product["sku"], 1, REASON, conversation, size="6")["preview"] is True
     assert admin_tools.admin_preview_goodwill_coupon(actor, customer["email"], 500, REASON, conversation)["preview"] is True
 
@@ -178,7 +182,7 @@ def test_preview_alone_changes_nothing(actor, conversation, order, product, cust
 def test_token_from_another_conversation_is_not_accepted(actor, conversation, order):
     """The direct analogue of the customer-side replay test. A confirmation
     obtained in one session must not authorise a write in another."""
-    admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation)
+    admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation, REASON_CODE)
 
     other = str(uuid.uuid4())
     with get_conn() as conn, conn.cursor() as cur:
@@ -188,17 +192,17 @@ def test_token_from_another_conversation_is_not_accepted(actor, conversation, or
         )
         conn.commit()
 
-    result = admin_tools.admin_cancel_order(actor, order, REASON, other)
+    result = admin_tools.admin_cancel_order(actor, order, REASON, other, REASON_CODE)
     assert result["applied"] is False
     assert result["reason"] == "no_pending_confirmation"
     assert _order_status(order) == "PLACED"
 
 
 def test_confirmation_cannot_be_replayed(actor, conversation, order):
-    admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation)
-    assert admin_tools.admin_cancel_order(actor, order, REASON, conversation)["applied"] is True
+    admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation, REASON_CODE)
+    assert admin_tools.admin_cancel_order(actor, order, REASON, conversation, REASON_CODE)["applied"] is True
 
-    again = admin_tools.admin_cancel_order(actor, order, REASON, conversation)
+    again = admin_tools.admin_cancel_order(actor, order, REASON, conversation, REASON_CODE)
     assert again["applied"] is False
     assert again["reason"] == "token_used"
 
@@ -236,9 +240,9 @@ def test_stock_quantity_cannot_drift_from_what_was_previewed(actor, conversation
 def test_reason_cannot_drift_from_what_was_previewed(actor, conversation, order):
     """The reason is what the audit log records. If the apply could pass a
     different one, the log would describe an action nobody confirmed."""
-    admin_tools.admin_preview_order_cancellation(actor, order, "stock was damaged in transit", conversation)
+    admin_tools.admin_preview_order_cancellation(actor, order, "stock was damaged in transit", conversation, REASON_CODE)
 
-    result = admin_tools.admin_cancel_order(actor, order, "customer changed their mind", conversation)
+    result = admin_tools.admin_cancel_order(actor, order, "customer changed their mind", conversation, REASON_CODE)
     assert result["applied"] is False
     assert result["reason"] == "params_changed"
     assert _order_status(order) == "PLACED"
@@ -247,11 +251,11 @@ def test_reason_cannot_drift_from_what_was_previewed(actor, conversation, order)
 def test_a_failed_apply_does_not_burn_the_confirmation(actor, conversation, order):
     """A rejected write must leave the confirmation usable, or a single fumbled
     argument would force the staff member through the whole flow again."""
-    assert admin_tools.admin_cancel_order(actor, order, "a different reason entirely", conversation)["applied"] is False
-    admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation)
-    assert admin_tools.admin_cancel_order(actor, "TPJ-NOSUCHORDER", REASON, conversation)["applied"] is False
+    assert admin_tools.admin_cancel_order(actor, order, "a different reason entirely", conversation, REASON_CODE)["applied"] is False
+    admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation, REASON_CODE)
+    assert admin_tools.admin_cancel_order(actor, "TPJ-NOSUCHORDER", REASON, conversation, REASON_CODE)["applied"] is False
 
-    assert admin_tools.admin_cancel_order(actor, order, REASON, conversation)["applied"] is True
+    assert admin_tools.admin_cancel_order(actor, order, REASON, conversation, REASON_CODE)["applied"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -311,10 +315,10 @@ def test_bad_stock_quantities_are_refused(actor, conversation, product, quantity
 
 @pytest.mark.parametrize("reason", [None, "", "   ", "x"])
 def test_writes_require_a_real_reason(actor, conversation, order, reason):
-    preview = admin_tools.admin_preview_order_cancellation(actor, order, reason, conversation)
+    preview = admin_tools.admin_preview_order_cancellation(actor, order, reason, conversation, REASON_CODE)
     assert preview["error"] == "reason_required"
 
-    result = admin_tools.admin_cancel_order(actor, order, reason, conversation)
+    result = admin_tools.admin_cancel_order(actor, order, reason, conversation, REASON_CODE)
     assert result["applied"] is False
     assert result["reason"] == "reason_required"
     assert _order_status(order) == "PLACED"
@@ -326,8 +330,8 @@ def test_writes_require_a_real_reason(actor, conversation, order, reason):
 
 
 def test_cancel_writes_a_complete_audit_row(actor, conversation, order):
-    admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation)
-    result = admin_tools.admin_cancel_order(actor, order, REASON, conversation)
+    admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation, REASON_CODE)
+    result = admin_tools.admin_cancel_order(actor, order, REASON, conversation, REASON_CODE)
 
     assert result["applied"] is True
     assert result["previous_status"] == "PLACED"
@@ -350,8 +354,8 @@ def test_cancel_writes_a_complete_audit_row(actor, conversation, order):
 
 
 def test_cancelled_order_gets_a_status_history_entry(actor, conversation, order):
-    admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation)
-    admin_tools.admin_cancel_order(actor, order, REASON, conversation)
+    admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation, REASON_CODE)
+    admin_tools.admin_cancel_order(actor, order, REASON, conversation, REASON_CODE)
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -363,7 +367,9 @@ def test_cancelled_order_gets_a_status_history_entry(actor, conversation, order)
             (order,),
         )
         history = cur.fetchall()
-    assert ("PLACED", "CANCELLED", "admin_cancelled") in history
+    # The structured code is appended to the history reason, so the audit trail
+    # records not just that staff cancelled it but which reason they chose.
+    assert ("PLACED", "CANCELLED", f"admin_cancelled:{REASON_CODE}") in history
 
 
 def test_stock_adjustment_applies_and_leaves_other_sizes_alone(actor, conversation, product):
@@ -457,10 +463,20 @@ def _demo_customer_id() -> str:
 )
 def test_orders_past_cancellation_are_refused(actor, conversation, order, status, expected):
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("UPDATE orders SET status = %s WHERE order_number = %s", (status, order))
+        # The CHECK constraint requires a resolved order to carry the matching
+        # reason, so the fixture has to set one too.
+        cur.execute(
+            """
+            UPDATE orders SET status = %s,
+                cancellation_reason_code = CASE WHEN %s = 'CANCELLED' THEN 'unspecified' END,
+                return_reason_code       = CASE WHEN %s = 'RETURNED'  THEN 'unspecified_return' END
+            WHERE order_number = %s
+            """,
+            (status, status, status, order),
+        )
         conn.commit()
 
-    assert admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation)["error"] == expected
+    assert admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation, REASON_CODE)["error"] == expected
     assert _order_status(order) == status
 
 
@@ -474,21 +490,21 @@ def test_shipped_orders_can_be_cancelled_by_staff(actor, conversation, order):
         )
         conn.commit()
 
-    admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation)
-    assert admin_tools.admin_cancel_order(actor, order, REASON, conversation)["applied"] is True
+    admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation, REASON_CODE)
+    assert admin_tools.admin_cancel_order(actor, order, REASON, conversation, REASON_CODE)["applied"] is True
     assert _order_status(order) == "CANCELLED"
 
 
 def test_status_change_between_preview_and_apply_is_caught(actor, conversation, order):
     """The token proves a preview happened; it never substitutes for re-checking.
     The customer may have cancelled it themselves in the meantime."""
-    admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation)
+    admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation, REASON_CODE)
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("UPDATE orders SET status = 'DELIVERED' WHERE order_number = %s", (order,))
         conn.commit()
 
-    result = admin_tools.admin_cancel_order(actor, order, REASON, conversation)
+    result = admin_tools.admin_cancel_order(actor, order, REASON, conversation, REASON_CODE)
     assert result["applied"] is False
     assert result["reason"] == "delivered"
     assert _order_status(order) == "DELIVERED"
@@ -540,7 +556,7 @@ def test_no_op_adjustment_is_refused(actor, conversation, product):
 
 
 def test_unknown_targets_are_refused(actor, conversation):
-    assert admin_tools.admin_preview_order_cancellation(actor, "TPJ-000000", REASON, conversation)["error"] == "not_found"
+    assert admin_tools.admin_preview_order_cancellation(actor, "TPJ-000000", REASON, conversation, REASON_CODE)["error"] == "not_found"
     assert admin_tools.admin_preview_stock_adjustment(actor, "TPJ-NOPE-9999", 1, REASON, conversation)["error"] == "not_found"
     assert admin_tools.admin_preview_goodwill_coupon(
         actor, "nobody@nowhere.invalid", 100, REASON, conversation)["error"] == "not_found"
@@ -551,3 +567,151 @@ def test_customer_email_lookup_is_case_insensitive(actor, conversation, customer
         actor, customer["email"].upper(), 100, REASON, conversation)
     assert result["preview"] is True
     assert result["customer_email"] == customer["email"]
+
+
+# ---------------------------------------------------------------------------
+# Staff returns — the fourth preview/apply pair.
+# ---------------------------------------------------------------------------
+
+
+def _delivered_order(customer_id: str, days_ago: int = 3, returnable: bool = True) -> tuple[str, str]:
+    """A DELIVERED order with one line item. Returns (order_number, sku)."""
+    import uuid as _uuid
+    from datetime import datetime, timedelta, timezone
+
+    sku = f"TPJ-ADR-{_uuid.uuid4().hex[:6].upper()}"
+    number = f"TPJ-D{_uuid.uuid4().hex[:6].upper()}"
+    delivered_at = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO products (sku, name, category, price_cents, stock_by_size, returnable)
+            VALUES (%s, %s, 'ring', 1000000, '{"_default": 2}'::jsonb, %s) RETURNING id
+            """,
+            (sku, f"Admin Return Ring {sku[-6:]}", returnable),
+        )
+        pid = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO orders (order_number, customer_id, status, placed_at, shipped_at,
+                                delivered_at, total_amount_cents, payment_status)
+            VALUES (%s, %s, 'DELIVERED', %s, %s, %s, 1000000, 'PAID') RETURNING id
+            """,
+            (number, customer_id, delivered_at - timedelta(days=4),
+             delivered_at - timedelta(days=3), delivered_at),
+        )
+        oid = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO order_items (order_id, product_id, quantity, unit_price_cents) VALUES (%s, %s, 1, 1000000)",
+            (oid, pid),
+        )
+        conn.commit()
+    return number, sku
+
+
+def test_staff_return_without_preview_is_refused(actor, conversation, customer):
+    order, _ = _delivered_order(customer["id"])
+    result = admin_tools.admin_return_order(actor, order, REASON, conversation, RETURN_CODE)
+    assert result["applied"] is False
+    assert result["reason"] == "no_pending_confirmation"
+    assert _order_status(order) == "DELIVERED"
+
+
+def test_staff_can_return_outside_the_customer_window(actor, conversation, customer):
+    """The override exists precisely to reach past the 30-day policy a customer
+    is held to."""
+    order, sku = _delivered_order(customer["id"], days_ago=120)
+
+    preview = admin_tools.admin_preview_order_return(actor, order, REASON, conversation, RETURN_CODE)
+    assert preview["preview"] is True
+    assert preview["outside_return_window"] is True
+
+    result = admin_tools.admin_return_order(actor, order, REASON, conversation, RETURN_CODE)
+    assert result["applied"] is True
+    assert _order_status(order) == "RETURNED"
+    assert result["restocked_items"] == [{"sku": sku, "size": "_default", "quantity": 1}]
+
+
+def test_staff_return_writes_a_complete_audit_row(actor, conversation, customer):
+    order, _ = _delivered_order(customer["id"])
+    admin_tools.admin_preview_order_return(actor, order, REASON, conversation, RETURN_CODE)
+    admin_tools.admin_return_order(actor, order, REASON, conversation, RETURN_CODE)
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id FROM orders WHERE order_number = %s", (order,))
+        order_id = str(cur.fetchone()[0])
+
+    rows = _audit_rows("admin_return_order", order_id)
+    assert len(rows) == 1
+    assert str(rows[0]["actor_customer_id"]) == actor
+    assert rows[0]["before_state"]["status"] == "DELIVERED"
+    assert rows[0]["after_state"]["status"] == "RETURNED"
+    assert rows[0]["after_state"]["return_reason_code"] == RETURN_CODE
+
+
+def test_staff_cannot_return_a_final_sale_item_without_the_damage_reason(actor, conversation, customer):
+    order, _ = _delivered_order(customer["id"], returnable=False)
+
+    blocked = admin_tools.admin_preview_order_return(actor, order, REASON, conversation, RETURN_CODE)
+    assert blocked["error"] == "final_sale"
+
+    # ...but a genuinely damaged one is the documented exception.
+    allowed = admin_tools.admin_preview_order_return(
+        actor, order, REASON, conversation, "damaged_on_arrival")
+    assert allowed["preview"] is True
+    assert admin_tools.admin_return_order(
+        actor, order, REASON, conversation, "damaged_on_arrival")["applied"] is True
+
+
+def test_staff_return_reason_cannot_drift_from_the_preview(actor, conversation, customer):
+    order, _ = _delivered_order(customer["id"])
+    admin_tools.admin_preview_order_return(actor, order, REASON, conversation, RETURN_CODE)
+
+    result = admin_tools.admin_return_order(actor, order, REASON, conversation, "damaged_on_arrival")
+    assert result["applied"] is False
+    assert result["reason"] == "params_changed"
+    assert _order_status(order) == "DELIVERED"
+
+
+def test_staff_cannot_return_an_undelivered_order(actor, conversation, order):
+    """`order` fixture is PLACED — cancellation territory, not returns."""
+    result = admin_tools.admin_preview_order_return(actor, order, REASON, conversation, RETURN_CODE)
+    assert result["error"] == "wrong_status"
+
+
+def test_cancellation_code_is_refused_on_a_staff_return(actor, conversation, customer):
+    order, _ = _delivered_order(customer["id"])
+    result = admin_tools.admin_preview_order_return(actor, order, REASON, conversation, "out_of_stock")
+    assert result["error"] == "bad_reason_code"
+
+
+def test_admin_cancel_restores_stock(actor, conversation, customer):
+    """The same one-way-ratchet fix, on the staff path."""
+    import uuid as _uuid
+
+    from src.tools import purchase_tools
+
+    # Its own product rather than the shared fixture: place_order only treats a
+    # product as sized when sizes_available is populated, and the shared fixture
+    # deliberately leaves it null.
+    sku = f"TPJ-ACS-{_uuid.uuid4().hex[:6].upper()}"
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO products (sku, name, category, price_cents, sizes_available, stock_by_size)
+            VALUES (%s, 'Admin Cancel Stock Ring', 'ring', 1000000, '["6"]'::jsonb, '{"6": 4}'::jsonb)
+            """,
+            (sku,),
+        )
+        conn.commit()
+    product = {"sku": sku}
+
+    before = _stock(product["sku"])
+    placed = purchase_tools.place_order(customer["id"], product["sku"], quantity=1, size="6")
+    assert placed["placed"] is True
+
+    admin_tools.admin_preview_order_cancellation(actor, placed["order_number"], REASON, conversation, REASON_CODE)
+    result = admin_tools.admin_cancel_order(actor, placed["order_number"], REASON, conversation, REASON_CODE)
+
+    assert result["applied"] is True
+    assert _stock(product["sku"]) == before

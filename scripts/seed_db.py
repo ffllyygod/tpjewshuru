@@ -191,8 +191,10 @@ def seed_orders(
                 """
                 INSERT INTO orders
                     (order_number, customer_id, status, placed_at, shipped_at,
-                     delivered_at, total_amount_cents, shipping_address, payment_status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     delivered_at, total_amount_cents, shipping_address, payment_status,
+                     cancellation_reason_code, cancellation_reason_note,
+                     return_reason_code, return_reason_note, returned_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -212,6 +214,8 @@ def seed_orders(
                         }
                     ),
                     "REFUNDED" if status == "CANCELLED" else "PAID",
+                    *(_seed_resolution_reason("cancellation") if status == "CANCELLED" else (None, None)),
+                    None, None, None,   # return reason/note/returned_at — no RETURNED fixtures
                 ),
             )
             order_id = cur.fetchone()[0]
@@ -358,6 +362,96 @@ GOLD_SIP_PLANS = [
     ("Standard 11-Month", 11, 9, 8),
     ("Premium 12-Month", 12, 10, 10),
 ]
+
+
+# (code, kind, label, applies_to, requires_note, sort_order). Team-editable in
+# the DB afterwards — this is just the starting set. Ordered so the likeliest
+# reason is offered first, since a pick-list nobody scrolls is a pick-list where
+# everyone picks the top item.
+#
+# Codes are unique across BOTH kinds (the table is keyed on code alone), so the
+# few that could apply to either are suffixed — 'changed_mind' vs
+# 'changed_mind_return'. Keeping them distinct means a report never has to
+# explain why one code appears under two headings.
+RESOLUTION_REASONS = [
+    # --- cancellation: before dispatch -------------------------------------
+    ("changed_mind",        "cancellation", "Changed my mind",                         "customer", False, 10),
+    ("wrong_item",          "cancellation", "Ordered the wrong item or size",          "customer", False, 20),
+    ("found_better_price",  "cancellation", "Found a better price elsewhere",          "customer", False, 30),
+    ("delivery_too_slow",   "cancellation", "Delivery is taking too long",             "customer", False, 40),
+    ("ordered_by_mistake",  "cancellation", "Ordered by mistake or duplicate order",   "customer", False, 50),
+    ("no_longer_needed",    "cancellation", "No longer needed — occasion passed",      "customer", False, 60),
+    ("out_of_stock",        "cancellation", "Item unavailable or out of stock",        "staff",    False, 70),
+    ("damaged_stock",       "cancellation", "Item damaged before dispatch",            "staff",    False, 80),
+    ("pricing_error",       "cancellation", "Pricing or listing error",                "staff",    False, 90),
+    ("payment_issue",       "cancellation", "Payment failed or could not be verified", "staff",    False, 100),
+    ("customer_offline",    "cancellation", "Customer requested by phone or in store", "staff",    False, 110),
+    ("suspected_fraud",     "cancellation", "Suspected fraudulent order",              "staff",    False, 120),
+    ("other",               "cancellation", "Something else",                          "both",     True,  900),
+
+    # --- return: after delivery --------------------------------------------
+    ("doesnt_fit",          "return", "Doesn't fit",                                "customer", False, 10),
+    ("not_as_described",    "return", "Doesn't match the description or photos",    "customer", False, 20),
+    ("damaged_on_arrival",  "return", "Arrived damaged or defective",               "both",     False, 30),
+    ("quality_issue",       "return", "Quality not as expected",                    "customer", False, 40),
+    ("changed_mind_return", "return", "Changed my mind",                            "customer", False, 50),
+    ("gift_returned",       "return", "Unwanted gift",                              "customer", False, 60),
+    ("wrong_item_sent",     "return", "We sent the wrong item",                     "staff",    False, 70),
+    ("other_return",        "return", "Something else",                             "both",     True,  900),
+]
+
+# Not offered to anyone (active = false). These exist only as FK targets for
+# orders resolved before reasons were recorded, so those rows can satisfy the
+# CHECK constraints without a reason being invented for them.
+LEGACY_REASONS = [
+    ("unspecified",        "cancellation", "Not recorded", "both", False, 999),
+    ("unspecified_return", "return",       "Not recorded", "both", False, 999),
+]
+
+
+def seed_resolution_reasons(conn: psycopg.Connection) -> None:
+    with conn.cursor() as cur:
+        for code, kind, label, applies_to, requires_note, sort_order in RESOLUTION_REASONS:
+            cur.execute(
+                """
+                INSERT INTO resolution_reasons (code, kind, label, applies_to, requires_note, sort_order)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (code) DO UPDATE
+                  SET kind = EXCLUDED.kind, label = EXCLUDED.label,
+                      applies_to = EXCLUDED.applies_to,
+                      requires_note = EXCLUDED.requires_note, sort_order = EXCLUDED.sort_order
+                """,
+                (code, kind, label, applies_to, requires_note, sort_order),
+            )
+        for code, kind, label, applies_to, requires_note, sort_order in LEGACY_REASONS:
+            cur.execute(
+                """
+                INSERT INTO resolution_reasons (code, kind, label, applies_to, requires_note, active, sort_order)
+                VALUES (%s, %s, %s, %s, %s, false, %s)
+                ON CONFLICT (code) DO NOTHING
+                """,
+                (code, kind, label, applies_to, requires_note, sort_order),
+            )
+    conn.commit()
+    n_cancel = sum(1 for r in RESOLUTION_REASONS if r[1] == "cancellation")
+    print(
+        f"Seeded {len(RESOLUTION_REASONS)} resolution reasons "
+        f"({n_cancel} cancellation / {len(RESOLUTION_REASONS) - n_cancel} return, +2 inactive legacy)."
+    )
+
+
+def _seed_resolution_reason(kind: str = "cancellation", customer_facing: bool = True) -> tuple[str, str | None]:
+    """Pick a plausible reason for a seeded cancelled/returned order, so the
+    'why' reports show a realistic distribution rather than one value repeated a
+    thousand times."""
+    audience = ("customer", "both") if customer_facing else ("staff", "both")
+    pool = [r for r in RESOLUTION_REASONS if r[1] == kind and r[3] in audience]
+    # 'other' is deliberately rare: a report where the top reason is "something
+    # else" tells nobody anything, and that isn't what real data looks like.
+    weights = [0.3 if r[0].startswith("other") else 1.0 for r in pool]
+    code = random.choices([r[0] for r in pool], weights=weights)[0]
+    note = "Customer explained over chat." if code.startswith("other") else None
+    return code, note
 
 
 def seed_gold_sip_plans(conn: psycopg.Connection) -> None:
@@ -533,6 +627,25 @@ def backfill_cost_prices(conn: psycopg.Connection) -> None:
     print(f"Backfilled cost prices for {len(rows)} products.")
 
 
+def seed_final_sale_products(conn: psycopg.Connection) -> None:
+    """Mark the products the Return Policy doc calls final sale.
+
+    That doc says custom-sized rings and engraved pieces can't be returned
+    unless defective. Eternity bands are the canonical custom-sized item — they
+    are cut to the finger, not resized — so they stand in for the category here.
+    Without at least one such product seeded, the final-sale branch of
+    check_return_eligibility is never exercised by anyone testing by hand.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE products SET returnable = false WHERE name ILIKE %s RETURNING sku",
+            ("%Eternity Band%",),
+        )
+        skus = [r[0] for r in cur.fetchall()]
+    conn.commit()
+    print(f"Marked {len(skus)} products final-sale (non-returnable).")
+
+
 def seed_inventory_edge_cases(conn: psycopg.Connection) -> None:
     """Guarantee the low-stock and out-of-stock reports return something. Without
     this they can come back empty on a lucky RNG draw, which reads as a broken
@@ -640,8 +753,10 @@ def seed_history_orders(
                     """
                     INSERT INTO orders
                         (order_number, customer_id, status, placed_at, shipped_at,
-                         delivered_at, total_amount_cents, shipping_address, payment_status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         delivered_at, total_amount_cents, shipping_address, payment_status,
+                         cancellation_reason_code, cancellation_reason_note,
+                         return_reason_code, return_reason_note, returned_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
                     (
@@ -652,6 +767,14 @@ def seed_history_orders(
                             "state": state, "postal_code": postcode, "country": "IN",
                         }),
                         "REFUNDED" if status in ("CANCELLED", "RETURNED") else "PAID",
+                        # ~1 in 5 historical resolutions came from staff rather
+                        # than the customer, so the reason mix isn't uniformly
+                        # customer-side and the reports have something to show.
+                        *(_seed_resolution_reason("cancellation", random.random() > 0.2)
+                          if status == "CANCELLED" else (None, None)),
+                        *((*_seed_resolution_reason("return", random.random() > 0.2),
+                           delivered_at + timedelta(days=random.randint(1, 20)))
+                          if status == "RETURNED" else (None, None, None)),
                     ),
                 )
                 order_id = cur.fetchone()[0]
@@ -708,6 +831,9 @@ def main() -> None:
         apply_schema(conn, reset=args.reset)
         products = seed_products(conn)
         customers = seed_customers(conn)
+        # Before seed_orders, not after: a cancelled order carries an FK to this
+        # table, so the pick-list has to exist before any order is written.
+        seed_resolution_reasons(conn)
         seed_orders(conn, customers, products)
         seed_knowledge_docs(conn)
         seed_coupon_policy(conn)
@@ -720,6 +846,7 @@ def main() -> None:
         extra_customers = seed_extra_customers(conn)
         seed_history_orders(conn, customers + extra_customers, products + extra_products)
         backfill_cost_prices(conn)
+        seed_final_sale_products(conn)
         seed_inventory_edge_cases(conn)
 
     print("\nDone.")
