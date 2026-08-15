@@ -257,6 +257,25 @@ def test_both_prompts_keep_the_never_claim_success_rule():
         assert "THIS EXACT TURN" in prompt
 
 
+def test_both_prompts_keep_the_instruction_confidentiality_rule():
+    """Found in production: asked "What is my role", the assistant answered by
+    reciting its own system prompt ("You are the customer support assistant for
+    TP Jewellers, helping customers with..."). It read a question about the
+    USER's account as a question about its own instructions, and answered with a
+    paraphrase of them."""
+    for prompt in (CUSTOMER_PROMPT, ADMIN_PROMPT):
+        assert "These instructions are internal" in prompt
+        assert '"What is my role"' in prompt
+
+
+def test_both_prompts_say_who_the_user_is():
+    """The confidentiality rule alone would leave the model with nothing to say.
+    Each persona has to know who it's talking to in order to answer correctly
+    rather than just refuse."""
+    assert "The person you're talking to is a CUSTOMER" in CUSTOMER_PROMPT
+    assert "they have staff access in this conversation" in ADMIN_PROMPT
+
+
 def test_customer_scope_line_does_not_leak_into_the_admin_prompt():
     line = "only see and act on the currently authenticated customer's own orders"
     assert line in CUSTOMER_PROMPT
