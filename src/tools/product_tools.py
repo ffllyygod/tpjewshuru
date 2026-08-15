@@ -9,6 +9,7 @@ from __future__ import annotations
 from psycopg.rows import dict_row
 
 from src.db.connection import get_conn
+from src.tools.formatting import format_inr
 
 VALID_CATEGORIES = {"ring", "necklace", "earring", "bracelet", "bangle", "pendant"}
 VALID_METALS = {"gold", "silver", "platinum", "rose_gold"}
@@ -21,6 +22,7 @@ def _row_to_product(row: dict) -> dict:
         "name": row["name"],
         "category": row["category"],
         "price": row["price_cents"] / 100,
+        "price_display": format_inr(row["price_cents"]),
         "metal": row["metal"],
         "stone": row["stone"],
         "sizes_available": row["sizes_available"],

@@ -1,8 +1,16 @@
 # TP Jewellers Chatbot
 
 Tool-calling AI agent for TP Jewellers (jewellery e-commerce): product
-browsing/recommendations, order status, cancellation (with guardrails), and
-store policy Q&A. Built under a 48-hour demo deadline starting 2026-08-15.
+browsing/recommendations, order status, cancellation (with guardrails),
+coupon-instead-of-refund settlement, Gold SIP schemes, and store policy Q&A.
+Built under a 48-hour demo deadline starting 2026-08-15.
+
+**Live deployment**: frontend `https://tpjewellers-chatbot.vercel.app`,
+backend `https://api-production-dd5a.up.railway.app`, Postgres on Railway
+(`pgvector/pgvector:pg16`, same image as local). **Never run
+`scripts/seed_db.py --reset` against the Railway `DATABASE_URL`** unless you
+mean to wipe production data — it's real, persisted, and someone may be
+mid-testing it.
 
 **Read `JOURNAL.md` before making non-trivial changes.** It has the actual
 reasoning behind decisions (why local Ollama instead of Claude API, why a
@@ -53,12 +61,18 @@ cancellation happy-path test actually cancels an order.
 
 Tool-calling agent, not classic RAG — order/cancellation queries are
 transactional DB lookups, not semantic retrieval. `src/agent/orchestrator.py`
-is a hand-rolled tool-use loop (not LangGraph) talking to a local Ollama
-model. `src/tools/` holds the actual logic: `order_tools.py` (status,
-cancellation-eligibility + confirmation-token issuance, cancel), `product_tools.py`
-(catalog browse/recommend), `knowledge_tools.py` (Postgres full-text search
-over policy docs). `src/api/main.py` is the thin FastAPI surface the web app
-talks to (`POST /conversations`, `POST /chat`).
+is a hand-rolled tool-use loop (not LangGraph) talking to a hosted OpenAI-
+compatible model (currently gpt-4o-mini via OpenRouter). `src/tools/` holds
+the actual logic: `order_tools.py` (status, cancellation-eligibility +
+confirmation-token issuance, cancel), `coupon_tools.py` (settlement offer,
+issuance, redemption — reused by Gold SIP's early-exit payout),
+`gold_sip_tools.py` (plan tiers, subscription lifecycle), `product_tools.py`
+(catalog browse/recommend), `purchase_tools.py` (place orders, optionally
+applying a coupon/SIP discount), `knowledge_tools.py` (Postgres full-text
+search over policy docs), `market_tools.py` (live gold/silver rates),
+`formatting.py` (INR currency formatting — see Guardrails below).
+`src/api/main.py` is the thin FastAPI surface the web app talks to
+(`POST /conversations`, `POST /chat`).
 
 ## Guardrails — the load-bearing design decisions
 
@@ -74,6 +88,13 @@ talks to (`POST /conversations`, `POST /chat`).
   cannot be replayed in another (see `JOURNAL.md`, 2026-08-15).
 - **Every tool call is audit-logged** to `tool_call_log` (name, args, result)
   by the orchestrator, not by individual tools.
+- **Currency arithmetic never happens in the model.** Every tool response
+  with a `*_cents` field also returns a matching `*_display` field
+  (`src/tools/formatting.py`), already correctly converted to ₹ with Indian
+  digit grouping. This exists because the model got this arithmetic wrong in
+  production, more than once, even after being explicitly told to be careful
+  — see `JOURNAL.md`. Same principle as every guardrail above: don't ask the
+  LLM to reliably do something a deterministic function can just do for it.
 
 ## Known gaps (see JOURNAL.md "what's next" / roadmap)
 

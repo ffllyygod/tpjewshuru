@@ -23,6 +23,7 @@ from psycopg.rows import dict_row
 
 from src.db.connection import get_conn
 from src.tools.coupon_tools import redeem_coupon
+from src.tools.formatting import format_inr
 from src.tools.gold_sip_tools import redeem_gold_sip
 
 
@@ -117,6 +118,7 @@ def place_order(
         "currency": "INR",
         "order_number": order_number,
         "total_amount_cents": total_amount_cents,
+        "total_amount_display": format_inr(total_amount_cents),
         "placed_at": order["placed_at"].isoformat(),
     }
 
@@ -126,8 +128,11 @@ def place_order(
         coupon_result = redeem_coupon(customer_id, coupon_code, order_number)
         result["coupon_applied"] = coupon_result.get("redeemed", False)
         if coupon_result.get("redeemed"):
+            final = total_amount_cents - coupon_result["discount_cents"]
             result["discount_cents"] = coupon_result["discount_cents"]
-            result["final_amount_cents"] = total_amount_cents - coupon_result["discount_cents"]
+            result["discount_display"] = format_inr(coupon_result["discount_cents"])
+            result["final_amount_cents"] = final
+            result["final_amount_display"] = format_inr(final)
         else:
             # Order still stands even if the coupon didn't apply — report why
             # separately rather than rolling back a successful purchase.
@@ -136,8 +141,11 @@ def place_order(
         sip_result = redeem_gold_sip(customer_id, gold_sip_code, order_number)
         result["gold_sip_applied"] = sip_result.get("redeemed", False)
         if sip_result.get("redeemed"):
+            final = total_amount_cents - sip_result["discount_cents"]
             result["discount_cents"] = sip_result["discount_cents"]
-            result["final_amount_cents"] = total_amount_cents - sip_result["discount_cents"]
+            result["discount_display"] = format_inr(sip_result["discount_cents"])
+            result["final_amount_cents"] = final
+            result["final_amount_display"] = format_inr(final)
         else:
             result["gold_sip_error"] = sip_result.get("message")
 

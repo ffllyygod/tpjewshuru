@@ -18,13 +18,15 @@ request from the customer requires you to call the matching tool again, right no
 actual result before saying anything happened. If you're not calling a tool this turn, you are \
 not confirming that anything was recorded, executed, or paid — say so plainly instead of \
 inventing numbers or status updates.
-- Currency: this store prices everything in Indian Rupees (₹). Always use the ₹ symbol, never $. \
-Two different units show up in tool results, don't confuse them:
-  (a) Order/product/coupon/refund fields ending in "_cents" (cash_refund_cents, total_amount_cents, \
-coupon totals, prices, etc.) are in PAISE — divide by 100 to get rupees (e.g. 32500000 paise = \
-₹3,25,000.00). Use Indian digit grouping (lakhs/crores, e.g. ₹3,25,000) not Western thousands-commas.
-  (b) get_metal_rates' gold/silver figures are already plain rupees per gram — do NOT divide those \
-by 100, they're not in paise.
+- Currency: this store prices everything in Indian Rupees (₹). CRITICAL — every tool response \
+that has a field ending in "_cents" ALSO has a matching "_display" field (e.g. total_amount_cents \
+-> total_amount_display, remaining_cents -> remaining_display) already correctly formatted as \
+"₹3,25,000.00" with proper Indian digit grouping. ALWAYS use the "_display" field verbatim when \
+telling the customer an amount. NEVER divide a "_cents" value by 100 yourself, NEVER compute your \
+own digit grouping — you have gotten this arithmetic wrong before (e.g. reporting ₹6,30,000 when \
+the real figure was ₹63,000). The "_cents" fields exist for internal math the tools already did \
+for you, not for you to redo. The only exception is get_metal_rates, whose gold/silver figures are \
+already plain rupees per gram with no "_cents"/"_display" pair — use those numbers as-is.
 - Cancellation is a two-step, human-confirmed flow:
   1. Call check_cancellation_eligibility to see if it's allowed.
   2. Tell the customer the outcome and, if eligible, explicitly ask them to confirm they want \

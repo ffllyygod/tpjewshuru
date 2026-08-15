@@ -39,6 +39,7 @@ from datetime import datetime, timedelta, timezone
 from psycopg.rows import dict_row
 
 from src.db.connection import get_conn
+from src.tools.formatting import format_inr
 
 SETTLEMENT_SOURCE_STATUSES = {"CANCELLED": "cancellation", "RETURNED": "return"}
 
@@ -115,6 +116,7 @@ def offer_settlement_options(customer_id: str, order_number: str) -> dict:
                 "already_settled": True,
                 "coupon_code": existing["code"],
                 "coupon_total_cents": existing["total_cents"],
+                "coupon_total_display": format_inr(existing["total_cents"]),
                 "coupon_status": existing["status"],
             }
 
@@ -127,8 +129,10 @@ def offer_settlement_options(customer_id: str, order_number: str) -> dict:
         "source_type": source_type,
         "currency": "INR",
         "cash_refund_cents": order["total_amount_cents"],
+        "cash_refund_display": format_inr(order["total_amount_cents"]),
         "cash_refund_note": "Cash refund typically takes 5-7 business days to process.",
         "coupon_total_cents": coupon_total_cents,
+        "coupon_total_display": format_inr(coupon_total_cents),
         "coupon_bonus_percent": float(bonus_percent),
         "coupon_note": f"Instant store credit, worth {bonus_percent}% more than the cash refund, usable on any future purchase.",
         "coupon_expiry_days": policy["expiry_days"],
@@ -159,6 +163,7 @@ def issue_coupon(customer_id: str, order_number: str, conversation_id: str) -> d
                 "already_existed": True,
                 "coupon_code": existing["code"],
                 "total_cents": existing["total_cents"],
+                "total_display": format_inr(existing["total_cents"]),
                 "expires_at": existing["expires_at"].isoformat(),
             }
 
@@ -182,6 +187,7 @@ def issue_coupon(customer_id: str, order_number: str, conversation_id: str) -> d
                     "already_existed": True,
                     "coupon_code": existing["code"],
                     "total_cents": existing["total_cents"],
+                    "total_display": format_inr(existing["total_cents"]),
                     "expires_at": existing["expires_at"].isoformat(),
                 }
             raise
@@ -193,6 +199,7 @@ def issue_coupon(customer_id: str, order_number: str, conversation_id: str) -> d
         "coupon_code": new["code"],
         "currency": "INR",
         "total_cents": new["total_cents"],
+        "total_display": format_inr(new["total_cents"]),
         "bonus_percent": float(bonus_percent),
         "expires_at": new["expires_at"].isoformat(),
     }
@@ -241,7 +248,9 @@ def get_my_coupons(customer_id: str) -> dict:
                 "code": r["code"],
                 "status": r["status"],
                 "total_cents": r["total_cents"],
+                "total_display": format_inr(r["total_cents"]),
                 "remaining_cents": r["remaining_cents"],
+                "remaining_display": format_inr(r["remaining_cents"]),
                 "issued_at": r["issued_at"].isoformat(),
                 "expires_at": r["expires_at"].isoformat(),
             }
@@ -317,6 +326,8 @@ def redeem_coupon(customer_id: str, code: str, order_number: str) -> dict:
         "currency": "INR",
         "order_number": order_number,
         "discount_cents": deduction,
+        "discount_display": format_inr(deduction),
         "coupon_remaining_cents": updated["remaining_cents"],
+        "coupon_remaining_display": format_inr(updated["remaining_cents"]),
         "coupon_status": updated["status"],
     }

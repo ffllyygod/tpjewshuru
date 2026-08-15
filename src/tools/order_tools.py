@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from psycopg.rows import dict_row
 
 from src.db.connection import get_conn
+from src.tools.formatting import format_inr
 
 CANCELLATION_WINDOW_HOURS = 24
 CANCELLABLE_FROM_STATUSES = {"PLACED", "CONFIRMED"}
@@ -32,6 +33,7 @@ def _row_to_order_summary(row: dict) -> dict:
         "status": row["status"],
         "placed_at": row["placed_at"].isoformat() if row["placed_at"] else None,
         "total_amount_cents": row["total_amount_cents"],
+        "total_amount_display": format_inr(row["total_amount_cents"]),
         "payment_status": row["payment_status"],
     }
 
@@ -87,6 +89,7 @@ def get_order_status(customer_id: str, order_number: str) -> dict:
         "shipped_at": order["shipped_at"].isoformat() if order["shipped_at"] else None,
         "delivered_at": order["delivered_at"].isoformat() if order["delivered_at"] else None,
         "total_amount_cents": order["total_amount_cents"],
+        "total_amount_display": format_inr(order["total_amount_cents"]),
         "payment_status": order["payment_status"],
         "items": [
             {
@@ -94,6 +97,7 @@ def get_order_status(customer_id: str, order_number: str) -> dict:
                 "sku": i["sku"],
                 "quantity": i["quantity"],
                 "unit_price_cents": i["unit_price_cents"],
+                "unit_price_display": format_inr(i["unit_price_cents"]),
                 "size": i["size"],
             }
             for i in items

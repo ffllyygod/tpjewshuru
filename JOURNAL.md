@@ -6,6 +6,36 @@ debugging this at 2am, and interview-me explaining design choices out loud.
 
 ---
 
+## 2026-08-15 (deployed, continued) — The currency-arithmetic bug recurred in production, fixed at the root
+
+Flagged as an unresolved residual risk in the Gold SIP journal entry
+("off-by-10x display error... recommended follow-up: pre-formatted currency
+strings, not built yet given time"). It recurred in live production use:
+`get_my_coupons` correctly returned `remaining_cents: 3250000` (= ₹32,500),
+and the model reported it to the user as **₹3,25,000** — 10x too high, same
+error class as before. Confirmed against the live Railway DB both before and
+after the report to rule out a real data bug — the DB was always correct,
+only the model's mental arithmetic was wrong, repeatedly.
+
+Built the fix that was previously only recommended: `src/tools/formatting.py`
+— `format_inr(cents)` returns a fully-formatted string (`"₹32,500.00"`,
+correct Indian digit grouping through crores) once, in Python, with a proper
+unit test (`tests/test_formatting.py`, including the exact real numbers that
+were wrong in production as regression cases). Every tool response with a
+`*_cents` field now also returns a matching `*_display` field. System prompt
+rewritten to make this non-optional: "NEVER divide a `_cents` value yourself,
+NEVER compute your own digit grouping... you have gotten this arithmetic
+wrong before" — naming the specific prior failure, not just a generic
+caution.
+
+**Lesson, stated plainly for anyone reading this later**: telling a model
+"be careful with this arithmetic" is not a fix — it was already told that,
+twice, and still got it wrong a third time in production. The actual fix was
+removing the arithmetic from the model's job entirely. This is the same
+principle as every other guardrail in this codebase (ownership checks,
+atomic balance decrements, DB-level idempotency constraints) — don't ask the
+LLM to reliably do something a deterministic function can just do for it.
+
 ## 2026-08-15 (deployed) — Live on Railway + Vercel
 
 Deployed the `gold-sip-schemes` branch's exact content (not merged into `main`

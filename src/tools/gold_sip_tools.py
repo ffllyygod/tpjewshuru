@@ -38,6 +38,7 @@ from psycopg.rows import dict_row
 
 from src.db.connection import get_conn
 from src.tools.coupon_tools import mint_coupon
+from src.tools.formatting import format_inr
 
 
 def _new_sip_code() -> str:
@@ -100,6 +101,7 @@ def start_gold_sip(customer_id: str, plan_name: str, monthly_amount: float) -> d
         "tenure_months": plan["tenure_months"],
         "bonus_percent": float(plan["bonus_percent"]),
         "monthly_amount_cents": monthly_amount_cents,
+        "monthly_amount_display": format_inr(monthly_amount_cents),
     }
 
 
@@ -180,11 +182,13 @@ def pay_sip_installment(customer_id: str, subscription_code: str) -> dict:
         "installments_paid": updated["installments_paid"],
         "tenure_months": sub["tenure_months_snapshot"],
         "total_paid_cents": updated["total_paid_cents"],
+        "total_paid_display": format_inr(updated["total_paid_cents"]),
         "status": updated["status"],
     }
     if matured:
         result["matured"] = True
         result["redeemable_cents"] = updated["redeemable_cents"]
+        result["redeemable_display"] = format_inr(updated["redeemable_cents"])
     return result
 
 
@@ -209,9 +213,13 @@ def get_my_gold_sips(customer_id: str) -> dict:
                 "installments_paid": r["installments_paid"],
                 "tenure_months": r["tenure_months_snapshot"],
                 "monthly_amount_cents": r["monthly_amount_cents"],
+                "monthly_amount_display": format_inr(r["monthly_amount_cents"]),
                 "total_paid_cents": r["total_paid_cents"],
+                "total_paid_display": format_inr(r["total_paid_cents"]),
                 "redeemable_cents": r["redeemable_cents"],
+                "redeemable_display": format_inr(r["redeemable_cents"]) if r["redeemable_cents"] is not None else None,
                 "remaining_cents": r["remaining_cents"],
+                "remaining_display": format_inr(r["remaining_cents"]) if r["remaining_cents"] is not None else None,
                 "started_at": r["started_at"].isoformat(),
                 "matured_at": r["matured_at"].isoformat() if r["matured_at"] else None,
             }
@@ -249,7 +257,13 @@ def cancel_gold_sip(customer_id: str, subscription_code: str) -> dict:
             cur.execute("SELECT code, total_cents FROM coupons WHERE source_subscription_id = %s", (sub["id"],))
             existing = cur.fetchone()
             if existing:
-                return {"cancelled": True, "already_existed": True, "coupon_code": existing["code"], "coupon_total_cents": existing["total_cents"]}
+                return {
+                    "cancelled": True,
+                    "already_existed": True,
+                    "coupon_code": existing["code"],
+                    "coupon_total_cents": existing["total_cents"],
+                    "coupon_total_display": format_inr(existing["total_cents"]),
+                }
             raise
 
         cur.execute(
@@ -268,6 +282,7 @@ def cancel_gold_sip(customer_id: str, subscription_code: str) -> dict:
         "penalty_percent": float(sub["early_exit_penalty_percent_snapshot"]),
         "coupon_code": coupon["code"],
         "coupon_total_cents": coupon["total_cents"],
+        "coupon_total_display": format_inr(coupon["total_cents"]),
         "message": "The maturity bonus was forfeited, but the rest of your payments (minus the early-exit fee) were issued as a store coupon.",
     }
 
@@ -328,6 +343,8 @@ def redeem_gold_sip(customer_id: str, subscription_code: str, order_number: str)
         "currency": "INR",
         "order_number": order_number,
         "discount_cents": deduction,
+        "discount_display": format_inr(deduction),
         "subscription_remaining_cents": updated["remaining_cents"],
+        "subscription_remaining_display": format_inr(updated["remaining_cents"]),
         "subscription_status": updated["status"],
     }
