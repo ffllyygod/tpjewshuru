@@ -28,7 +28,7 @@ from supertokens_python.recipe.session import SessionContainer
 from supertokens_python.recipe.session.framework.fastapi import verify_session
 
 from src.agent.orchestrator import run_turn
-from src.api.auth import init_auth, resolve_customer_id_from_session
+from src.api.auth import init_auth, resolve_customer_id_from_session, resolve_principal_from_session
 from src.db.connection import get_conn
 
 init_auth()
@@ -53,10 +53,19 @@ app.add_middleware(
 )
 
 
+class StartConversationRequest(BaseModel):
+    # 'admin' opens a staff-console conversation and is rejected with 403 unless
+    # the verified session resolves to an admin. Note this is a *request*, never
+    # an assertion of identity — the server decides.
+    mode: str = "customer"
+
+
 class StartConversationResponse(BaseModel):
     conversation_id: str
     customer_id: str | None
     customer_name: str | None
+    role: str
+    mode: str
 
 
 class ChatRequest(BaseModel):
@@ -74,47 +83,64 @@ def health():
 
 
 @app.post("/conversations", response_model=StartConversationResponse)
-def start_conversation(session: SessionContainer | None = Depends(verify_session(session_required=False))):
-    customer_id = resolve_customer_id_from_session(session)
+def start_conversation(
+    req: StartConversationRequest | None = None,
+    session: SessionContainer | None = Depends(verify_session(session_required=False)),
+):
+    principal = resolve_principal_from_session(session)
+    requested_mode = (req.mode if req else "customer") or "customer"
 
-    customer_name = None
-    if customer_id:
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT name FROM customers WHERE id = %s", (customer_id,))
-            row = cur.fetchone()
-            customer_name = row["name"] if row else None
+    if requested_mode not in ("customer", "admin"):
+        raise HTTPException(status_code=422, detail="mode must be 'customer' or 'admin'.")
+    # Staff mode is granted by the server from the verified session's role —
+    # never by the client asking nicely.
+    if requested_mode == "admin" and not principal.is_admin:
+        raise HTTPException(status_code=403, detail="Staff access required.")
 
     conv_id = str(uuid.uuid4())
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO conversations (id, customer_id) VALUES (%s, %s)",
-            (conv_id, customer_id),
+            "INSERT INTO conversations (id, customer_id, mode) VALUES (%s, %s, %s)",
+            (conv_id, principal.customer_id, requested_mode),
         )
         conn.commit()
 
     return StartConversationResponse(
         conversation_id=conv_id,
-        customer_id=customer_id,
-        customer_name=customer_name,
+        customer_id=principal.customer_id,
+        customer_name=principal.name,
+        role=principal.role,
+        mode=requested_mode,
     )
 
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, session: SessionContainer | None = Depends(verify_session(session_required=False))):
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT customer_id FROM conversations WHERE id = %s", (req.conversation_id,))
+        cur.execute("SELECT customer_id, mode FROM conversations WHERE id = %s", (req.conversation_id,))
         conv = cur.fetchone()
     if not conv:
         raise HTTPException(status_code=404, detail="Unknown conversation_id.")
 
     conv_customer_id = str(conv["customer_id"]) if conv["customer_id"] else None
-    session_customer_id = resolve_customer_id_from_session(session)
+    principal = resolve_principal_from_session(session)
 
     # A customer-owned conversation requires the caller's verified session to
     # resolve to that SAME customer — closes the "guess someone else's
     # conversation_id" gap. Anonymous conversations need no session, unchanged.
-    if conv_customer_id is not None and conv_customer_id != session_customer_id:
+    if conv_customer_id is not None and conv_customer_id != principal.customer_id:
         raise HTTPException(status_code=403, detail="This conversation belongs to a different customer.")
 
-    reply = run_turn(req.conversation_id, conv_customer_id, req.message)
+    # Re-checked every turn, not just at creation: if this account's admin flag
+    # was revoked since the conversation started, staff tools stop working on the
+    # very next message rather than at token expiry.
+    if conv["mode"] == "admin" and not principal.is_admin:
+        raise HTTPException(status_code=403, detail="Staff access required for this conversation.")
+
+    reply = run_turn(
+        req.conversation_id,
+        conv_customer_id,
+        req.message,
+        is_admin=(conv["mode"] == "admin"),
+    )
     return ChatResponse(reply=reply)

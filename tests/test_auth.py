@@ -29,12 +29,21 @@ def _demo_customer_email_and_id() -> tuple[str, str]:
     return "arun@shurutech.com", str(row[0])
 
 
-def _new_conversation(customer_id: str | None) -> str:
+def _new_conversation(customer_id: str | None, mode: str = "customer") -> str:
     conv_id = str(uuid.uuid4())
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("INSERT INTO conversations (id, customer_id) VALUES (%s, %s)", (conv_id, customer_id))
+        cur.execute(
+            "INSERT INTO conversations (id, customer_id, mode) VALUES (%s, %s, %s)",
+            (conv_id, customer_id, mode),
+        )
         conn.commit()
     return conv_id
+
+
+def _principal(customer_id: str | None, role: str = "customer") -> auth_module.Principal:
+    if customer_id is None:
+        return auth_module.ANONYMOUS
+    return auth_module.Principal(customer_id=customer_id, role=role, name="Test", email="t@example.com")
 
 
 def _fake_session():
@@ -124,7 +133,7 @@ def test_chat_rejects_session_belonging_to_a_different_customer():
     other_customer_id = str(uuid.uuid4())  # a different, unrelated customer
     client = _client_with_session(other_customer_id)
     try:
-        with patch("src.api.main.resolve_customer_id_from_session", return_value=other_customer_id):
+        with patch("src.api.main.resolve_principal_from_session", return_value=_principal(other_customer_id)):
             resp = client.post("/chat", json={"conversation_id": conv_id, "message": "hi"})
     finally:
         app.dependency_overrides.clear()
@@ -138,7 +147,7 @@ def test_chat_allows_session_matching_the_conversation_owner():
 
     client = _client_with_session(owner_customer_id)
     try:
-        with patch("src.api.main.resolve_customer_id_from_session", return_value=owner_customer_id), \
+        with patch("src.api.main.resolve_principal_from_session", return_value=_principal(owner_customer_id)), \
              patch("src.api.main.run_turn", return_value="ok"):
             resp = client.post("/chat", json={"conversation_id": conv_id, "message": "hi"})
     finally:
@@ -152,7 +161,7 @@ def test_chat_allows_anonymous_access_to_anonymous_conversation():
 
     client = _client_with_session(None)
     try:
-        with patch("src.api.main.resolve_customer_id_from_session", return_value=None), \
+        with patch("src.api.main.resolve_principal_from_session", return_value=auth_module.ANONYMOUS), \
              patch("src.api.main.run_turn", return_value="ok"):
             resp = client.post("/chat", json={"conversation_id": conv_id, "message": "hi"})
     finally:
@@ -164,7 +173,7 @@ def test_chat_allows_anonymous_access_to_anonymous_conversation():
 def test_chat_unknown_conversation_id_is_404():
     client = _client_with_session(None)
     try:
-        with patch("src.api.main.resolve_customer_id_from_session", return_value=None):
+        with patch("src.api.main.resolve_principal_from_session", return_value=auth_module.ANONYMOUS):
             resp = client.post("/chat", json={"conversation_id": str(uuid.uuid4()), "message": "hi"})
     finally:
         app.dependency_overrides.clear()
