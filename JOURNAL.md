@@ -6,6 +6,46 @@ debugging this at 2am, and interview-me explaining design choices out loud.
 
 ---
 
+## 2026-08-15 (key rotation) — Failing over between LLM API keys
+
+**Why**: a single OpenRouter key is a single point of failure for the whole
+agent — free-tier credits run out mid-demo, and a dead key means every turn
+500s. Now `LLM_API_KEY` (or `LLM_API_KEYS`) accepts a comma-separated list,
+and `_call_model()` fails over across them.
+
+**Design notes worth keeping**:
+- **Sticky active key, not round-robin.** Once a key fails, `_active_key`
+  moves to whichever one worked, so later turns don't pay a wasted 401
+  round-trip re-testing the dead key on every single request. Round-robin
+  would spread load but re-hit dead keys forever.
+- **Rotate on the right errors only.** 401/402/403/429 and 5xx rotate;
+  400-class schema errors deliberately do **not**. If a malformed tool
+  schema were treated as rotatable, one real bug would silently burn through
+  every key and surface as the useless "all keys down" instead of the actual
+  error message. This is the same instinct as the auth entry below: a
+  mechanism that hides its real failure reason costs hours later.
+- **Keys never hit the logs** — failures log position only (`key #1/2`).
+- No lock on `_active_key`. FastAPI runs these sync handlers in a
+  threadpool, but an int rebind is atomic under the GIL, and the worst case
+  of a torn read is one redundant retry that the failover loop already
+  handles. A lock here would be ceremony.
+
+**Verified, not assumed**: both keys confirmed live individually against
+OpenRouter; then with a deliberately-dead key injected in front — call 1
+rotated past it and answered, call 2 went straight to the working key with
+no retry of the dead one, and a bad-model 400 correctly returned
+`_should_rotate -> False`. Full suite 53/53 after a reseed.
+
+**Gotcha for future-me**: the 5 test failures seen before the reseed
+(`test_full_cancellation_happy_path` and friends) were just the documented
+stale-DB state — the happy-path test really cancels `TPJ-10000`, so the
+suite is not idempotent without `seed_db.py --reset`. Not a regression.
+
+**Still to do**: production only has the one original key in Railway's env —
+the second needs adding there for failover to exist in prod too.
+
+---
+
 ## 2026-08-15 (real auth) — Real authentication: SuperTokens + Gmail SMTP, and a debugging story with a twist ending
 
 **The gap this closes**: `POST /conversations {email}` used to trust a

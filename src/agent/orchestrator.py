@@ -1,9 +1,12 @@
 """The agent's tool-use loop.
 
 Backend: any OpenAI-compatible chat-completions provider, configured via
-LLM_BASE_URL/LLM_API_KEY/LLM_MODEL. Currently OpenRouter hosting DeepSeek —
-see JOURNAL.md for why (tried NVIDIA NIM first; its endpoint stalled for
-minutes on this network for reasons unrelated to NIM itself). Given a
+LLM_BASE_URL/LLM_API_KEY/LLM_MODEL. Currently OpenRouter hosting
+gpt-4o-mini — see JOURNAL.md for why (tried NVIDIA NIM first; its endpoint
+stalled for minutes on this network for reasons unrelated to NIM itself,
+then DeepSeek, which confabulated a payment success without calling the
+tool). LLM_API_KEY(S) accepts a comma-separated list and _call_model()
+fails over between them on auth/credit/rate-limit/outage errors. Given a
 conversation_id (already persisted), a customer_id (from the authenticated
 session — never from the LLM), and the latest user message, runs the
 tool-use loop to completion and returns the final assistant text. Every
@@ -19,9 +22,17 @@ logging) lives here once and doesn't care which model is answering.
 from __future__ import annotations
 
 import json
+import logging
 import os
 
-from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    OpenAI,
+    RateLimitError,
+)
 from psycopg.rows import dict_row
 
 from src.agent.system_prompt import SYSTEM_PROMPT
@@ -30,16 +41,43 @@ from src.db.connection import get_conn
 from src.tools import coupon_tools, gold_sip_tools, knowledge_tools, market_tools, order_tools, product_tools, purchase_tools
 
 LLM_MODEL = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
 MAX_TOOL_ITERATIONS = 8
 
-_client = OpenAI(
-    base_url=os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1"),
-    # The OpenAI SDK raises at construction time on an empty api_key —
-    # placeholder here so import/tests work before a real key is set; an
-    # actual model call will still (correctly) fail auth until LLM_API_KEY
-    # is filled in.
-    api_key=os.environ.get("LLM_API_KEY") or "not-set",
-)
+logger = logging.getLogger(__name__)
+
+
+def _load_api_keys() -> list[str]:
+    """Keys to rotate through, in preference order.
+
+    Accepts a comma-separated list in either LLM_API_KEYS or LLM_API_KEY, so
+    a single-key setup (the old shape) keeps working untouched. Duplicates
+    are dropped — order-preserving, because a repeated key would otherwise
+    make failover retry an already-failed credential.
+    """
+    raw = os.environ.get("LLM_API_KEYS") or os.environ.get("LLM_API_KEY") or ""
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    return list(dict.fromkeys(keys))
+
+
+# The OpenAI SDK raises at construction time on an empty api_key —
+# placeholder here so import/tests work before a real key is set; an actual
+# model call will still (correctly) fail auth until a key is filled in.
+_API_KEYS = _load_api_keys() or ["not-set"]
+_CLIENTS = [OpenAI(base_url=LLM_BASE_URL, api_key=key) for key in _API_KEYS]
+
+# Which key to try first. Sticky: once a key fails over, later turns start
+# from the one that worked instead of re-testing the dead key every call.
+# Plain int, no lock — FastAPI runs these sync handlers in a threadpool, but
+# an int rebind is atomic under the GIL and the worst case of a torn read is
+# one redundant retry, which the failover loop already handles.
+_active_key = 0
+
+# Errors where trying a different key is the right move: exhausted credits
+# (402), revoked/invalid key (401), rate limit (429), and provider-side
+# outages. Deliberately NOT 400-class schema errors — those are our bug, and
+# rotating through every key would just bury the real message.
+_ROTATE_ON_STATUS = frozenset({401, 402, 403, 408, 409, 429})
 
 # Anthropic-style schema -> OpenAI-style function schema (also what NIM expects).
 _TOOLS_OPENAI = [
@@ -149,13 +187,58 @@ def _save_message(conversation_id: str, role: str, content: str) -> None:
         conn.commit()
 
 
+def _should_rotate(exc: Exception) -> bool:
+    """True if a *different* API key might succeed where this one failed."""
+    if isinstance(exc, (AuthenticationError, RateLimitError)):
+        return True
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        # Could be our network rather than this key, but the next key is a
+        # different connection attempt and costs one round-trip to find out.
+        return True
+    if isinstance(exc, APIStatusError):
+        return exc.status_code in _ROTATE_ON_STATUS or exc.status_code >= 500
+    return False
+
+
 def _call_model(messages: list[dict]):
-    return _client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
-        tools=_TOOLS_OPENAI,
-        tool_choice="auto",
-    )
+    """One model call, failing over across API keys.
+
+    Tries the currently-active key first, then every other key in order.
+    Only the last error is raised if they all fail — by then the useful
+    signal is "every key is down", which the log lines below spell out.
+    """
+    global _active_key
+
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+        "tools": _TOOLS_OPENAI,
+        "tool_choice": "auto",
+    }
+
+    last_exc: Exception | None = None
+    for offset in range(len(_CLIENTS)):
+        index = (_active_key + offset) % len(_CLIENTS)
+        try:
+            response = _CLIENTS[index].chat.completions.create(**payload)
+        except Exception as exc:  # noqa: BLE001 — re-raised below if unrotatable
+            if not _should_rotate(exc):
+                raise
+            last_exc = exc
+            # Never log the key itself — position only.
+            logger.warning(
+                "LLM key #%d/%d failed (%s: %s); trying next key",
+                index + 1, len(_CLIENTS), type(exc).__name__, exc,
+            )
+            continue
+
+        if index != _active_key:
+            logger.info("LLM failover: now using key #%d/%d", index + 1, len(_CLIENTS))
+            _active_key = index
+        return response
+
+    logger.error("All %d LLM API key(s) failed; giving up on this turn", len(_CLIENTS))
+    raise last_exc  # type: ignore[misc]  # unreachable with an empty key list — _CLIENTS is never empty
 
 
 def run_turn(conversation_id: str, customer_id: str | None, user_message: str) -> str:
