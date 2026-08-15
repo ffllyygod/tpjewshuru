@@ -6,6 +6,95 @@ debugging this at 2am, and interview-me explaining design choices out loud.
 
 ---
 
+## 2026-08-15 (branch: coupon-redeem-system) — Coupon-instead-of-refund system
+
+**Business case:** cash refund = real money leaves the business, no guarantee
+the customer ever buys again. Store-credit coupon = no cash leaves at all —
+it's a claim on a *future in-house purchase*, so the "refunded" customer is
+structurally retained. A modest bonus (team-editable via `coupon_policy`,
+not hardcoded — no deploy needed to retune it) is cheap insurance against
+losing the customer's lifetime value entirely. Real gift-card/store-credit
+"breakage" (issued value never fully redeemed) typically runs several
+percent — pure recovered margin for the business.
+
+**Schema:** `coupon_policy` (single editable row: cancellation/return bonus
+%, expiry days) + `coupons` (code, customer_id, source_order_id UNIQUE —
+DB-enforced one-coupon-per-order, amount/bonus/total/remaining_cents,
+status, expiry) + `orders.coupon_id`/`discount_cents`. `orders` and
+`coupons` are mutually referential (coupon → source order, order → coupon
+used to pay for it), so one FK (`orders.coupon_id`) had to be added via
+`ALTER TABLE` after both `CREATE TABLE`s rather than inline — schema.sql
+executes top-to-bottom, can't forward-reference a table that doesn't exist
+yet.
+
+**Security guardrails** (explicit ask from the user — "must not be
+exploitable"; treated as a money-adjacent feature throughout, not
+retrofitted):
+- Coupon farming defeated by DB-level `source_order_id UNIQUE`, not just
+  app logic — `issue_coupon` also independently re-verifies the order's
+  status from the DB (never trusts the conversation), so prompt injection
+  claiming "the system already approved my coupon" can't work — there's
+  no capability for the tool to believe conversation text over DB state.
+- Cross-customer redemption: `redeem_coupon` always checks
+  `coupons.customer_id` against the server-injected customer_id, same
+  ownership-check pattern as every order tool. Deliberately returns the
+  same "not_found" message whether a code doesn't exist or belongs to
+  someone else — doesn't confirm code existence to an unauthorized caller.
+- **Double-redeem race condition (TOCTOU)** — the one place a naive
+  read-check-write would be genuinely exploitable under concurrent
+  requests. Fixed with a single atomic guarded UPDATE:
+  `SET remaining_cents = remaining_cents - %s WHERE remaining_cents >= %s
+  RETURNING ...` — the DB row lock makes it indivisible. Same pattern
+  applied to `place_order`'s stock decrement (oversell protection). Also
+  added a `CHECK (remaining_cents >= 0 AND remaining_cents <= total_cents)`
+  constraint on `coupons` as a second line of defense in case the guard
+  logic ever has a bug.
+- No tool anywhere accepts a caller-supplied amount/price/discount as a raw
+  number from the model — `issue_coupon`'s value, `place_order`'s total, and
+  `redeem_coupon`'s deduction are all computed server-side from DB state.
+
+**New capability that had to be built to make redemption demonstrable:**
+`purchase_tools.place_order` — there was no way to actually create a new
+order before this (only seeded orders existed). Closes a real gap
+(`search_products`/`get_product_details` existed with no way to buy
+anything) independent of the coupon feature.
+
+**Two real bugs found during live verification** (not caught by the 8
+new unit tests, which is exactly why live verification still matters):
+1. After a successful `cancel_order`, the model sometimes stopped with an
+   empty reply instead of chaining to `offer_settlement_options` in the
+   same turn, despite the system prompt saying to. Fixed by making the
+   instruction more forceful/explicit ("immediately, in the SAME turn,
+   without waiting to be asked... do this every time") — prompt-following
+   for multi-step chaining needed to be stated more emphatically than a
+   single soft mention.
+2. **Currency bug**: the model displayed a cash-refund amount with a ₹
+   symbol instead of $. Root cause: `offer_settlement_options`'s response
+   never stated a currency (bare cent integers), and since the model had
+   discussed INR gold rates earlier in the same system (`get_metal_rates`),
+   it defaulted wrong when the units were ambiguous. Fixed at the data
+   layer, not just the prompt: added an explicit `"currency": "USD"` field
+   to every money-returning coupon/purchase tool response, plus a
+   system-prompt rule stating plainly that all order/coupon amounts are USD
+   and only `get_metal_rates` is INR. Lesson: don't rely on the model
+   inferring units from context — state them explicitly in the tool's own
+   output, the same way `source_order_id UNIQUE` states the idempotency
+   constraint at the DB level instead of hoping application code gets it
+   right.
+
+**Live-verified full loop, real DB state checked at every step, not just
+the model's claimed reply text**: cancel TPJ-DEMO01 → auto-chained
+settlement offer ($2,850 cash vs. $3,135 coupon, correct $ this time) →
+chose coupon → issued (`coupons` row confirmed: $3,135.00, ACTIVE) →
+browsed necklaces → placed a $3,064.76 order applying the coupon in one
+step → DB confirmed `orders.discount_cents = 306476`,
+`coupons.remaining_cents = 7024` (partial redemption, correctly still
+`ACTIVE` with the leftover balance available for a future purchase — real
+multi-use store-credit behavior, not single-use).
+
+Branch not pushed yet — same policy as `main` earlier, push only when
+explicitly asked.
+
 ## 2026-08-15 (later night) — Markdown rendering, live gold/silver rates, git init
 
 **Markdown rendering:** DeepSeek (like most models) replies in markdown

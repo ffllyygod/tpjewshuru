@@ -27,7 +27,7 @@ from psycopg.rows import dict_row
 from src.agent.system_prompt import SYSTEM_PROMPT
 from src.agent.tool_schemas import TOOLS
 from src.db.connection import get_conn
-from src.tools import knowledge_tools, market_tools, order_tools, product_tools
+from src.tools import coupon_tools, knowledge_tools, market_tools, order_tools, product_tools, purchase_tools
 
 LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek/deepseek-chat")
 MAX_TOOL_ITERATIONS = 8
@@ -64,9 +64,19 @@ _TOOL_IMPL = {
     "search_products": product_tools.search_products,
     "get_product_details": product_tools.get_product_details,
     "get_metal_rates": market_tools.get_metal_rates,
+    "offer_settlement_options": coupon_tools.offer_settlement_options,
+    "issue_coupon": coupon_tools.issue_coupon,
+    "request_cash_refund": coupon_tools.request_cash_refund,
+    "get_my_coupons": coupon_tools.get_my_coupons,
+    "redeem_coupon": coupon_tools.redeem_coupon,
+    "place_order": purchase_tools.place_order,
 }
-_NEEDS_CUSTOMER_ID = {"list_customer_orders", "get_order_status", "check_cancellation_eligibility", "cancel_order"}
-_NEEDS_CONVERSATION_ID = {"check_cancellation_eligibility", "cancel_order"}
+_NEEDS_CUSTOMER_ID = {
+    "list_customer_orders", "get_order_status", "check_cancellation_eligibility", "cancel_order",
+    "offer_settlement_options", "issue_coupon", "request_cash_refund", "get_my_coupons",
+    "redeem_coupon", "place_order",
+}
+_NEEDS_CONVERSATION_ID = {"check_cancellation_eligibility", "cancel_order", "issue_coupon"}
 
 
 def _log_tool_call(conversation_id: str, tool_name: str, arguments: dict, result: dict) -> None:

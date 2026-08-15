@@ -51,7 +51,15 @@ CREATE TABLE orders (
   delivered_at        TIMESTAMPTZ,
   total_amount_cents  BIGINT NOT NULL,
   shipping_address    JSONB,
-  payment_status      TEXT NOT NULL DEFAULT 'PAID'  -- PAID | REFUNDED | PENDING
+  payment_status      TEXT NOT NULL DEFAULT 'PAID',  -- PAID | REFUNDED | PENDING | refund_pending
+  -- Set when this order was placed using coupon balance (src/tools/purchase_tools.py).
+  -- discount_cents is tracked separately from total_amount_cents so the "real" catalog
+  -- total stays visible/auditable alongside what the coupon actually covered.
+  -- FK to coupons(id) added below via ALTER TABLE, once that table exists —
+  -- coupons.source_order_id references orders(id), so the two tables are mutually
+  -- referential and one FK has to be added after both CREATE TABLEs.
+  coupon_id           UUID,
+  discount_cents      BIGINT NOT NULL DEFAULT 0
 );
 
 CREATE INDEX orders_customer_id_idx ON orders(customer_id);
@@ -144,3 +152,46 @@ CREATE TABLE confirmation_tokens (
   used_at           TIMESTAMPTZ,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ============================================================
+-- Coupons — instant store-credit alternative to a cash refund on
+-- cancellation/return. See src/tools/coupon_tools.py and JOURNAL.md for the
+-- business rationale and the security guardrails around this table.
+-- ============================================================
+
+-- Team-editable incentive policy. No code deploy needed to tune the bonus —
+-- just UPDATE this row. bonus_percent_applied on each coupon snapshots the
+-- policy at issuance time so later edits don't retroactively change coupons
+-- already given out.
+CREATE TABLE coupon_policy (
+  id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name                        TEXT NOT NULL UNIQUE DEFAULT 'default',
+  cancellation_bonus_percent  NUMERIC NOT NULL DEFAULT 10,
+  return_bonus_percent        NUMERIC NOT NULL DEFAULT 15,
+  expiry_days                 INT NOT NULL DEFAULT 180,
+  updated_at                  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE coupons (
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code                  TEXT NOT NULL UNIQUE,   -- e.g. "TPJ-CPN-xxxxxxxxxxxx"
+  customer_id           UUID NOT NULL REFERENCES customers(id),
+  source_type           TEXT NOT NULL,          -- 'cancellation' | 'return'
+  -- One coupon per cancelled/returned order — enforced at the DB level, not
+  -- just in application logic, so a bug or a retried tool call can't double-issue.
+  source_order_id       UUID NOT NULL UNIQUE REFERENCES orders(id),
+  amount_cents          BIGINT NOT NULL,        -- original order value the coupon is based on
+  bonus_percent_applied NUMERIC NOT NULL,        -- snapshot of policy at issuance
+  total_cents           BIGINT NOT NULL,        -- amount_cents * (1 + bonus_percent_applied/100)
+  remaining_cents       BIGINT NOT NULL,        -- decremented atomically as it's spent; starts == total_cents
+  status                TEXT NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE | REDEEMED | EXPIRED | CANCELLED
+  issued_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at            TIMESTAMPTZ NOT NULL,
+  CHECK (remaining_cents >= 0 AND remaining_cents <= total_cents)
+);
+
+CREATE INDEX coupons_customer_id_idx ON coupons(customer_id);
+CREATE INDEX coupons_code_idx ON coupons(code);
+
+ALTER TABLE orders
+  ADD CONSTRAINT orders_coupon_id_fkey FOREIGN KEY (coupon_id) REFERENCES coupons(id);

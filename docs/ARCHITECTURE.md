@@ -1,5 +1,10 @@
 # TP Jewellers Support Chatbot — System Architecture
 
+> This is the original design doc — still accurate on the core "tool-calling
+> agent, not RAG" decision and the guardrail philosophy. For what's actually
+> been built, what changed along the way (LLM backend swaps, currency bugs
+> found live, etc.) and why, see `JOURNAL.md` — that's the as-built history.
+
 ## The core design decision: tool-calling agent, not RAG-first
 
 A customer asking "where is my order #A1234" or "cancel my order" is not asking a
@@ -116,6 +121,15 @@ real inventory. The agent loop is not trusted to gate this alone:
 - `conversations` — id, customer_id (nullable pre-auth), started_at
 - `messages` — id, conversation_id, role, content, created_at
 - `tool_call_log` — id, conversation_id, tool_name, arguments (jsonb), result (jsonb), created_at
+- `confirmation_tokens` — id, conversation_id, action, target_id, token, expires_at, used_at
+- `coupon_policy` — team-editable incentive settings (cancellation/return bonus %, expiry days);
+  no code deploy needed to retune the coupon-vs-cash-refund incentive
+- `coupons` — id, code, customer_id, source_type (cancellation|return), source_order_id
+  (UNIQUE — one coupon per order, DB-enforced), amount_cents, bonus_percent_applied (snapshot
+  at issuance), total_cents, remaining_cents (atomically decremented — supports partial/
+  multi-order redemption), status, issued_at, expires_at
+- `orders` also has `coupon_id` + `discount_cents` — set when an order was placed using
+  coupon balance (see `src/tools/coupon_tools.py`, `src/tools/purchase_tools.py`)
 
 ## Stack
 

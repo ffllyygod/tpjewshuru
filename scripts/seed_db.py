@@ -330,6 +330,19 @@ def seed_knowledge_docs(conn: psycopg.Connection) -> None:
           " run scripts/index_knowledge.py separately once VOYAGE_API_KEY is set).")
 
 
+def seed_coupon_policy(conn: psycopg.Connection) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO coupon_policy (name, cancellation_bonus_percent, return_bonus_percent, expiry_days)
+            VALUES ('default', 10, 15, 180)
+            ON CONFLICT (name) DO NOTHING
+            """
+        )
+    conn.commit()
+    print("Seeded default coupon policy (10% cancellation / 15% return bonus, 180-day expiry).")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--reset", action="store_true", help="drop and recreate the schema first")
@@ -347,6 +360,7 @@ def main() -> None:
         customers = seed_customers(conn)
         seed_orders(conn, customers, products)
         seed_knowledge_docs(conn)
+        seed_coupon_policy(conn)
 
     print("\nDone.")
 
