@@ -6,6 +6,37 @@ debugging this at 2am, and interview-me explaining design choices out loud.
 
 ---
 
+## 2026-08-15 (later night) — Markdown rendering, live gold/silver rates, git init
+
+**Markdown rendering:** DeepSeek (like most models) replies in markdown
+(`**bold**`, numbered lists) but the chat UI was rendering it as literal
+text. Added `react-markdown` + `remark-gfm` (`web/src/components/Markdown.tsx`),
+themed to match the gold/dark palette. Only assistant bubbles parse
+markdown — user's own typed messages stay plain text (no reason to
+markdown-parse input you didn't generate).
+
+**Live gold/silver rates (`src/tools/market_tools.py`, new `get_metal_rates`
+tool):** two free, keyless public APIs — `gold-api.com` for XAU/XAG spot
+price, `open.er-api.com` for USD→INR — converted to INR/gram for 24K/22K/18K
+gold and fine silver. 5-minute in-memory cache (avoid hammering free APIs on
+every turn) and fails soft (returns an error dict, orchestrator's existing
+exception handling would have caught it anyway, but explicit is clearer).
+**Important honesty constraint, stated in both the tool's own response and
+the system prompt:** this is a spot-market estimate, not a showroom quote —
+real Indian retail pricing adds import duty, GST, and making charges on top.
+The system prompt explicitly forbids presenting spot rate as "our price."
+Live-tested: "what's today's date and gold/silver rate in india" → correct
+date, correct INR/gram figures for all three gold purities + silver, caveat
+included unprompted, 13.8s.
+
+**Git:** initialized, remote `https://github.com/ffllyygod/tpjewshuru.git`
+added, not yet pushed. Local identity only (`ffllyygod` / same as the
+`eopps` repo earlier this session) — never touched global git config.
+Extended `.gitignore` for the new `web/` Next.js app (`node_modules/`,
+`.next/`, `.env.local`) before the first commit — verified `.env` (real
+secrets) and `node_modules` were excluded from `git status --short` before
+committing, not just trusted the `.gitignore` to be correct.
+
 ## 2026-08-15 (night, continued) — NIM stalled on this network too → OpenRouter/DeepSeek
 
 The NIM swap above was correct in design but hit a real environmental wall:
