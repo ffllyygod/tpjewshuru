@@ -245,3 +245,300 @@ TOOLS = [
         },
     },
 ]
+
+# ---------------------------------------------------------------------------
+# Staff-only tools. Advertised ONLY to admin-mode conversations (see
+# orchestrator._tools_for) and enforced by orchestrator._ADMIN_ONLY.
+#
+# `actor_customer_id` is deliberately absent from every schema below, for the
+# same reason `customer_id` is absent from the customer schemas: the agent does
+# not get to choose who it is acting as. The orchestrator injects it from the
+# verified session.
+# ---------------------------------------------------------------------------
+
+_PERIOD_DESC = (
+    "One of: today, week, month, quarter, year, last_month, last_12_months, custom. "
+    "Use 'custom' with start_date and end_date (YYYY-MM-DD) for anything else."
+)
+
+ADMIN_TOOLS = [
+    {
+        "name": "admin_sales_summary",
+        "description": (
+            "Headline sales figures for a period — order count, net revenue, average order value, "
+            "cancellations, returns — plus a comparison against the previous period of the same "
+            "length. Use this for 'how were sales last month', 'how are we doing this week', "
+            "'what's our revenue this quarter'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "period": {"type": "string", "description": _PERIOD_DESC},
+                "start_date": {"type": "string", "description": "YYYY-MM-DD, only with period='custom'."},
+                "end_date": {"type": "string", "description": "YYYY-MM-DD, only with period='custom'."},
+            },
+            "required": ["period"],
+        },
+    },
+    {
+        "name": "admin_sales_breakdown",
+        "description": (
+            "Revenue broken down by ONE dimension. dimension='category' answers 'revenue by "
+            "category'; 'product' answers 'top selling products'; 'customer' answers 'who are our "
+            "best customers'; 'month' answers 'monthly sales trend'; 'metal' answers 'gold vs "
+            "silver'; 'status' answers 'how many orders were cancelled'. Pick the dimension that "
+            "matches what was actually asked — don't substitute a different one."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dimension": {
+                    "type": "string",
+                    "enum": ["month", "category", "metal", "product", "customer", "status"],
+                },
+                "period": {"type": "string", "description": _PERIOD_DESC},
+                "start_date": {"type": "string"},
+                "end_date": {"type": "string"},
+                "limit": {"type": "integer", "description": "Max rows, default 10."},
+            },
+            "required": ["dimension", "period"],
+        },
+    },
+    {
+        "name": "admin_inventory_status",
+        "description": (
+            "Stock levels across the catalogue. filter='low_stock' (at or below each product's "
+            "threshold), 'out_of_stock' (zero), or 'all'. Use for 'what's running low', 'what's "
+            "out of stock', 'stock levels for rings'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filter": {"type": "string", "enum": ["low_stock", "out_of_stock", "all"]},
+                "category": {
+                    "type": "string",
+                    "enum": ["ring", "necklace", "earring", "bracelet", "bangle", "pendant"],
+                },
+                "limit": {"type": "integer"},
+            },
+            "required": ["filter"],
+        },
+    },
+    {
+        "name": "admin_find_orders",
+        "description": (
+            "Search orders across ALL customers, filtered by status, customer email, and/or date "
+            "range. Use for 'show me cancelled orders this week', 'what has this customer ordered'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["PLACED", "CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED", "RETURNED"],
+                },
+                "customer_email": {"type": "string"},
+                "start_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "end_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "limit": {"type": "integer"},
+            },
+        },
+    },
+    {
+        "name": "admin_order_detail",
+        "description": (
+            "Full detail for one order by order_number, including which customer it belongs to, "
+            "its line items, and its complete status history. order_number looks like TPJ-123456 "
+            "or TPJ-H00123 — it is NOT a product SKU (e.g. TPJ-RIN-1010 is a SKU)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"order_number": {"type": "string"}},
+            "required": ["order_number"],
+        },
+    },
+    {
+        "name": "admin_find_customer",
+        "description": (
+            "Find customers by name, email or phone, with their order count and lifetime spend. "
+            "Returns only a masked phone number — use admin_customer_profile for full details on "
+            "one specific person."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Name, email, or phone fragment."},
+                "limit": {"type": "integer"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "admin_customer_profile",
+        "description": (
+            "Everything about ONE customer, looked up by their exact email address: recent orders, "
+            "coupons, Gold SIP subscriptions, and lifetime value. Use admin_find_customer first if "
+            "you don't already have the exact email."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"customer_email": {"type": "string"}},
+            "required": ["customer_email"],
+        },
+    },
+    {
+        "name": "admin_bot_stats",
+        "description": (
+            "Aggregate chatbot usage for a period: conversation count, tool-call volume, most-used "
+            "tools, and error rate. Returns NO conversation content — customers' messages are not "
+            "accessible through this assistant."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"period": {"type": "string", "description": _PERIOD_DESC}},
+            "required": ["period"],
+        },
+    },
+
+    # -----------------------------------------------------------------------
+    # Writes. Each is a preview/apply pair; `conversation_id` is absent from
+    # every schema below for the same reason `actor_customer_id` is — the
+    # orchestrator injects it, and it is what scopes the confirmation to this
+    # conversation. A model that could choose it could replay a confirmation
+    # from someone else's session.
+    # -----------------------------------------------------------------------
+    {
+        "name": "admin_preview_order_cancellation",
+        "description": (
+            "STEP 1 of cancelling any customer's order. Read-only: shows who the order belongs to, "
+            "its status and total, and what would change. Call this FIRST, tell the staff member "
+            "what it says, and wait for them to confirm before calling admin_cancel_order."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order_number": {"type": "string", "description": "e.g. TPJ-123456. NOT a product SKU."},
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Why this is being cancelled, in the staff member's own words (e.g. "
+                        "'customer called, ordered the wrong size'). Written to the permanent "
+                        "audit log. Ask them if they haven't said."
+                    ),
+                },
+            },
+            "required": ["order_number", "reason"],
+        },
+    },
+    {
+        "name": "admin_cancel_order",
+        "description": (
+            "STEP 2 — actually cancels any customer's order, overriding the 24-hour window "
+            "customers are held to. Only call after admin_preview_order_cancellation in this same "
+            "conversation AND an explicit yes from the staff member in a separate message. Pass "
+            "the SAME order_number and the SAME reason you previewed; different values are "
+            "rejected. Does not refund anything — settlement is separate."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order_number": {"type": "string"},
+                "reason": {"type": "string", "description": "Must match the reason given to the preview, verbatim."},
+            },
+            "required": ["order_number", "reason"],
+        },
+    },
+    {
+        "name": "admin_preview_stock_adjustment",
+        "description": (
+            "STEP 1 of correcting stock on hand. Read-only: shows the product's current quantity "
+            "for that size and what it would become. Use admin_inventory_status first if you don't "
+            "already have the exact SKU."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sku": {"type": "string", "description": "Product SKU, e.g. TPJ-RIN-1010."},
+                "new_quantity": {
+                    "type": "integer",
+                    "description": "The absolute quantity to set, NOT a delta to add or subtract.",
+                },
+                "size": {
+                    "type": "string",
+                    "description": (
+                        "Which size to adjust. Omit for products stocked without sizes; required "
+                        "when a product has several, and the error will list the valid ones."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why (e.g. 'stock count found 3 extra'). Written to the audit log.",
+                },
+            },
+            "required": ["sku", "new_quantity", "reason"],
+        },
+    },
+    {
+        "name": "admin_adjust_stock",
+        "description": (
+            "STEP 2 — sets the on-hand quantity for one product and size. Only call after "
+            "admin_preview_stock_adjustment in this conversation AND an explicit yes from the "
+            "staff member. Pass the SAME sku, size, quantity and reason you previewed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sku": {"type": "string"},
+                "new_quantity": {"type": "integer"},
+                "size": {"type": "string"},
+                "reason": {"type": "string", "description": "Must match the reason given to the preview, verbatim."},
+            },
+            "required": ["sku", "new_quantity", "reason"],
+        },
+    },
+    {
+        "name": "admin_preview_goodwill_coupon",
+        "description": (
+            "STEP 1 of giving a customer store credit as a goodwill gesture (a delayed delivery, a "
+            "service complaint) — NOT tied to any order and NOT a refund. Read-only: confirms who "
+            "the customer is and what the coupon would be worth. Creates nothing. Use "
+            "admin_find_customer first to get their exact email."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "customer_email": {"type": "string", "description": "The customer's exact email address."},
+                "amount_rupees": {
+                    "type": "integer",
+                    "description": (
+                        "Whole rupees, NOT paise — pass 5000 for ₹5,000. There is a per-coupon cap; "
+                        "an amount over it is refused outright rather than trimmed."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why the goodwill credit is being given. Written to the audit log.",
+                },
+            },
+            "required": ["customer_email", "amount_rupees", "reason"],
+        },
+    },
+    {
+        "name": "admin_issue_goodwill_coupon",
+        "description": (
+            "STEP 2 — actually creates the store-credit coupon and returns its code. Only call "
+            "after admin_preview_goodwill_coupon in this conversation AND an explicit yes from the "
+            "staff member. Pass the SAME email, amount and reason you previewed — a different "
+            "amount is rejected, not silently issued."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "customer_email": {"type": "string"},
+                "amount_rupees": {"type": "integer", "description": "Whole rupees. Must match the previewed amount."},
+                "reason": {"type": "string", "description": "Must match the reason given to the preview, verbatim."},
+            },
+            "required": ["customer_email", "amount_rupees", "reason"],
+        },
+    },
+]

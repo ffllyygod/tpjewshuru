@@ -103,7 +103,7 @@ def insert_order(conn: psycopg.Connection, customer_id: str, order_number: str, 
             """
             INSERT INTO orders (order_number, customer_id, status, placed_at, shipped_at, delivered_at,
                                  total_amount_cents, shipping_address, payment_status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'paid')
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'PAID')
             ON CONFLICT (order_number) DO UPDATE SET status = EXCLUDED.status
             RETURNING id
             """,

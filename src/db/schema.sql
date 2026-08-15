@@ -13,11 +13,17 @@ CREATE TYPE message_role AS ENUM ('user', 'assistant', 'system', 'tool');
 -- ============================================================
 -- Customers
 -- ============================================================
+-- `role` is the ONLY source of truth for staff access. Admins live in this
+-- table (not a separate staff table) deliberately: it means an admin logs in
+-- through the exact same OTP flow, and src/api/auth.py's anti-enumeration gate
+-- (which checks `customers` before sending a code) keeps working untouched.
+-- A separate staff table would have locked staff out of login entirely.
 CREATE TABLE customers (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name        TEXT NOT NULL,
   email       TEXT NOT NULL UNIQUE,
   phone       TEXT,
+  role        TEXT NOT NULL DEFAULT 'customer' CHECK (role IN ('customer', 'admin')),
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -35,7 +41,16 @@ CREATE TABLE products (
   stone             TEXT,                    -- diamond | ruby | emerald | sapphire | none
   sizes_available   JSONB,                   -- e.g. ["5","6","7","8"], null for non-sized items
   stock_by_size     JSONB NOT NULL DEFAULT '{}'::jsonb,  -- e.g. {"6": 3, "7": 0}; {"_default": 12} for unsized
-  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+  -- Nullable on purpose: margin is unknowable for rows without it, and a report
+  -- that says "cost data incomplete" is better than one that quietly reports
+  -- 100% margin. Only the admin persona ever reads this.
+  cost_price_cents     BIGINT,
+  low_stock_threshold  INT NOT NULL DEFAULT 2,
+  -- Discontinuing a product can't be a DELETE (order_items FKs it), so soft-delete
+  -- is the only correct shape. search_products filters on this.
+  active               BOOLEAN NOT NULL DEFAULT true,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- ============================================================
@@ -51,7 +66,12 @@ CREATE TABLE orders (
   delivered_at        TIMESTAMPTZ,
   total_amount_cents  BIGINT NOT NULL,
   shipping_address    JSONB,
-  payment_status      TEXT NOT NULL DEFAULT 'PAID',  -- PAID | REFUNDED | PENDING | refund_pending
+  -- CHECK-constrained and uppercase-only. Before this, 'PAID' and 'paid' both
+  -- existed in the live DB (add_demo_user.py wrote the lowercase one), which
+  -- would silently drop rows from any admin revenue report filtering on 'PAID'.
+  -- The constraint is what stops that class of bug coming back.
+  payment_status      TEXT NOT NULL DEFAULT 'PAID'
+                      CHECK (payment_status IN ('PAID', 'REFUNDED', 'PENDING', 'REFUND_PENDING')),
   -- Set when this order was placed using coupon balance (src/tools/purchase_tools.py).
   -- discount_cents is tracked separately from total_amount_cents so the "real" catalog
   -- total stays visible/auditable alongside what the coupon actually covered.
@@ -64,6 +84,9 @@ CREATE TABLE orders (
 );
 
 CREATE INDEX orders_customer_id_idx ON orders(customer_id);
+-- Every admin report is a date-range scan over orders. Cheap now, load-bearing
+-- at real volume.
+CREATE INDEX orders_placed_at_idx ON orders(placed_at DESC);
 
 CREATE TABLE order_items (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -75,6 +98,8 @@ CREATE TABLE order_items (
 );
 
 CREATE INDEX order_items_order_id_idx ON order_items(order_id);
+-- Top-seller / revenue-by-category reports all join order_items by product_id.
+CREATE INDEX order_items_product_id_idx ON order_items(product_id);
 
 CREATE TABLE order_status_history (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -113,9 +138,17 @@ CREATE INDEX knowledge_docs_tsv_idx ON knowledge_docs USING GIN(content_tsv);
 -- ============================================================
 -- Conversation state
 -- ============================================================
+-- `mode` decides which toolset and which system prompt this conversation gets.
+-- Separate from customers.role on purpose: role says what you MAY do, mode says
+-- what you're doing RIGHT NOW. An admin shopping for themselves starts a normal
+-- 'customer' conversation and gets exactly the customer experience — so the model
+-- is never left choosing between cancel_order and admin_cancel_order on vibes.
+-- Setting mode='admin' requires role='admin'; it's fixed for the conversation's
+-- lifetime and re-verified on every turn (so a demoted admin loses access at once).
 CREATE TABLE conversations (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   customer_id   UUID REFERENCES customers(id),  -- nullable: pre-authentication turns
+  mode          TEXT NOT NULL DEFAULT 'customer' CHECK (mode IN ('customer', 'admin')),
   started_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -143,16 +176,47 @@ CREATE INDEX tool_call_log_conversation_id_idx ON tool_call_log(conversation_id)
 
 -- Guardrail: a mutating action (e.g. cancel_order) requires a token minted by an
 -- explicit prior confirmation step; the token is single-use and short-lived.
+-- Admin writes reuse this table with their own action values
+-- ('admin_cancel_order', 'admin_adjust_stock', ...). Note target_id is NOT NULL,
+-- which structurally forbids bulk admin writes — one row per confirmation.
 CREATE TABLE confirmation_tokens (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   conversation_id   UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   action            TEXT NOT NULL,   -- e.g. 'cancel_order'
   target_id         UUID NOT NULL,   -- e.g. the order id
+  -- The rest of what was previewed, when the target alone doesn't pin the
+  -- action down. Cancelling order X is fully described by X; adjusting stock or
+  -- issuing a coupon is not — "give this customer ₹500" and "give this customer
+  -- ₹5,00,000" share a target_id, so without this a token minted for the small
+  -- one would authorise the large one. Admin writes re-derive their effect from
+  -- here and reject a call whose arguments drifted from the preview.
+  params            JSONB NOT NULL DEFAULT '{}'::jsonb,
   token             TEXT NOT NULL UNIQUE,
   expires_at        TIMESTAMPTZ NOT NULL,
   used_at           TIMESTAMPTZ,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Admin write ledger. NOT redundant with tool_call_log: that table records the
+-- MODEL-supplied arguments only, so the server-injected actor identity never
+-- appears in it — and "which admin did this to whom" is precisely the question
+-- you need answered after a cross-customer write. before_state is what makes a
+-- manual reversal possible; `reason` is NOT NULL so no audit row is meaningless.
+CREATE TABLE admin_action_log (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  actor_customer_id  UUID NOT NULL REFERENCES customers(id),
+  conversation_id    UUID REFERENCES conversations(id) ON DELETE SET NULL,
+  action             TEXT NOT NULL,     -- 'admin_cancel_order' | 'admin_adjust_stock' | ...
+  target_table       TEXT NOT NULL,     -- 'orders' | 'products' | 'customers'
+  target_id          UUID NOT NULL,
+  before_state       JSONB,
+  after_state        JSONB,
+  reason             TEXT NOT NULL,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX admin_action_log_target_idx ON admin_action_log(target_table, target_id);
+CREATE INDEX admin_action_log_actor_idx ON admin_action_log(actor_customer_id, created_at DESC);
 
 -- ============================================================
 -- Coupons — instant store-credit alternative to a cash refund on
@@ -175,7 +239,8 @@ CREATE TABLE coupon_policy (
 
 -- source_order_id / source_subscription_id are mutually exclusive — a coupon
 -- comes from EITHER a cancelled/returned order OR an early-exited Gold SIP
--- (src/tools/gold_sip_tools.py), never both. source_subscription_id's FK to
+-- (src/tools/gold_sip_tools.py), never both — OR, for a 'goodwill' coupon
+-- issued by staff, from neither. source_subscription_id's FK to
 -- gold_sip_subscriptions(id) is added later via ALTER TABLE, since that table
 -- doesn't exist yet at this point in the file (coupons and gold_sip_subscriptions
 -- are mutually referential — coupons.source_subscription_id / gold_sip_subscriptions.exit_coupon_id).
@@ -183,7 +248,7 @@ CREATE TABLE coupons (
   id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   code                   TEXT NOT NULL UNIQUE,   -- e.g. "TPJ-CPN-xxxxxxxxxxxx"
   customer_id            UUID NOT NULL REFERENCES customers(id),
-  source_type            TEXT NOT NULL,          -- 'cancellation' | 'return' | 'gold_sip_cancellation'
+  source_type            TEXT NOT NULL,          -- 'cancellation' | 'return' | 'gold_sip_cancellation' | 'goodwill'
   source_order_id        UUID REFERENCES orders(id),
   source_subscription_id UUID,
   amount_cents           BIGINT NOT NULL,        -- original order/SIP value the coupon is based on
@@ -194,7 +259,20 @@ CREATE TABLE coupons (
   issued_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
   expires_at             TIMESTAMPTZ NOT NULL,
   CHECK (remaining_cents >= 0 AND remaining_cents <= total_cents),
-  CHECK (num_nonnulls(source_order_id, source_subscription_id) = 1)
+  -- Was `= 1` — every coupon had to trace back to an order or a SIP, which made
+  -- a staff goodwill coupon (compensation for a delayed delivery, say)
+  -- structurally impossible to represent. Relaxing it to `<= 1` alone would
+  -- have been too loose: it would also permit a *cancellation* coupon with no
+  -- order behind it, quietly detaching the audit trail that the settlement flow
+  -- depends on. So the sourceless case is admitted only for source_type
+  -- 'goodwill', which by definition has no source but must instead have an
+  -- admin_action_log row naming the staff member who issued it.
+  CONSTRAINT coupons_source_matches_type CHECK (
+    CASE WHEN source_type = 'goodwill'
+         THEN num_nonnulls(source_order_id, source_subscription_id) = 0
+         ELSE num_nonnulls(source_order_id, source_subscription_id) = 1
+    END
+  )
 );
 
 -- One coupon per source (order OR subscription) — enforced at the DB level via

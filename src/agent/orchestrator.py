@@ -35,10 +35,10 @@ from openai import (
 )
 from psycopg.rows import dict_row
 
-from src.agent.system_prompt import SYSTEM_PROMPT
-from src.agent.tool_schemas import TOOLS
+from src.agent.system_prompt import prompt_for
+from src.agent.tool_schemas import ADMIN_TOOLS, TOOLS
 from src.db.connection import get_conn
-from src.tools import coupon_tools, gold_sip_tools, knowledge_tools, market_tools, order_tools, product_tools, purchase_tools
+from src.tools import admin_tools, coupon_tools, gold_sip_tools, knowledge_tools, market_tools, order_tools, product_tools, purchase_tools
 
 LLM_MODEL = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
@@ -80,17 +80,21 @@ _active_key = 0
 _ROTATE_ON_STATUS = frozenset({401, 402, 403, 408, 409, 429})
 
 # Anthropic-style schema -> OpenAI-style function schema (also what NIM expects).
-_TOOLS_OPENAI = [
-    {
-        "type": "function",
-        "function": {
-            "name": t["name"],
-            "description": t["description"],
-            "parameters": t["input_schema"],
-        },
-    }
-    for t in TOOLS
-]
+def _to_openai(tools: list[dict]) -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["input_schema"],
+            },
+        }
+        for t in tools
+    ]
+
+
+_TOOLS_OPENAI = _to_openai(TOOLS)
 
 # Maps tool name -> callable
 _TOOL_IMPL = {
@@ -114,6 +118,24 @@ _TOOL_IMPL = {
     "get_my_gold_sips": gold_sip_tools.get_my_gold_sips,
     "cancel_gold_sip": gold_sip_tools.cancel_gold_sip,
     "redeem_gold_sip": gold_sip_tools.redeem_gold_sip,
+    # Staff-only — gated by _ADMIN_ONLY below, never reachable from a customer
+    # conversation regardless of what the model emits.
+    "admin_sales_summary": admin_tools.admin_sales_summary,
+    "admin_sales_breakdown": admin_tools.admin_sales_breakdown,
+    "admin_inventory_status": admin_tools.admin_inventory_status,
+    "admin_find_orders": admin_tools.admin_find_orders,
+    "admin_order_detail": admin_tools.admin_order_detail,
+    "admin_find_customer": admin_tools.admin_find_customer,
+    "admin_customer_profile": admin_tools.admin_customer_profile,
+    "admin_bot_stats": admin_tools.admin_bot_stats,
+    # Staff writes — each preview mints a confirmation the matching apply
+    # consumes; see the WRITES section of src/tools/admin_tools.py.
+    "admin_preview_order_cancellation": admin_tools.admin_preview_order_cancellation,
+    "admin_cancel_order": admin_tools.admin_cancel_order,
+    "admin_preview_stock_adjustment": admin_tools.admin_preview_stock_adjustment,
+    "admin_adjust_stock": admin_tools.admin_adjust_stock,
+    "admin_preview_goodwill_coupon": admin_tools.admin_preview_goodwill_coupon,
+    "admin_issue_goodwill_coupon": admin_tools.admin_issue_goodwill_coupon,
 }
 _NEEDS_CUSTOMER_ID = {
     "list_customer_orders", "get_order_status", "check_cancellation_eligibility", "cancel_order",
@@ -121,7 +143,53 @@ _NEEDS_CUSTOMER_ID = {
     "redeem_coupon", "place_order",
     "start_gold_sip", "pay_sip_installment", "get_my_gold_sips", "cancel_gold_sip", "redeem_gold_sip",
 }
-_NEEDS_CONVERSATION_ID = {"check_cancellation_eligibility", "cancel_order", "issue_coupon"}
+_NEEDS_CONVERSATION_ID = {
+    "check_cancellation_eligibility", "cancel_order", "issue_coupon",
+    # Every admin write, both halves: the preview mints a token scoped to this
+    # conversation and the apply looks it up by the same scope. Injected here,
+    # never model-supplied — a model that could pass a conversation_id could
+    # redeem a confirmation minted in someone else's session.
+    "admin_preview_order_cancellation", "admin_cancel_order",
+    "admin_preview_stock_adjustment", "admin_adjust_stock",
+    "admin_preview_goodwill_coupon", "admin_issue_goodwill_coupon",
+}
+
+# Staff-only tools. Populated as admin tools land; the gate below is already
+# live so the mechanism is proven before it has anything to guard.
+#
+# _ADMIN_ONLY must never intersect _NEEDS_CUSTOMER_ID (asserted in tests):
+# admin tools receive `actor_customer_id` (WHO is acting), never `customer_id`
+# (WHOSE data). Keeping those two names distinct is what preserves the meaning
+# of `customer_id` as "the scope of this query" everywhere else in the codebase.
+_ADMIN_ONLY: set[str] = {t["name"] for t in ADMIN_TOOLS}
+
+# Tool names each persona is allowed to see. Filtering the advertised list is an
+# ACCURACY measure, not a security one — the _ADMIN_ONLY check in _execute_tool
+# is what actually enforces access. It matters because tool-selection accuracy
+# degrades with list length (JOURNAL.md records the model picking a
+# wrong-but-valid SKU), so customers shouldn't pay for admin tools they can
+# never call.
+_ADMIN_EXCLUDED_FROM_CUSTOMER = _ADMIN_ONLY
+# Personal-account tools make no sense in a staff console — an admin asking
+# about "my orders" should start a normal customer conversation.
+_CUSTOMER_ONLY = {
+    "list_customer_orders", "get_order_status", "check_cancellation_eligibility", "cancel_order",
+    "offer_settlement_options", "issue_coupon", "request_cash_refund", "get_my_coupons",
+    "redeem_coupon", "place_order",
+    "start_gold_sip", "pay_sip_installment", "get_my_gold_sips", "cancel_gold_sip", "redeem_gold_sip",
+}
+
+# TOOLS holds only customer/shared tools; ADMIN_TOOLS is a separate list, so the
+# customer persona cannot accidentally inherit a staff tool by someone appending
+# to the wrong list.
+_TOOLS_OPENAI_CUSTOMER = _to_openai([t for t in TOOLS if t["name"] not in _ADMIN_ONLY])
+_TOOLS_OPENAI_ADMIN = _to_openai(
+    [t for t in TOOLS if t["name"] not in _CUSTOMER_ONLY] + ADMIN_TOOLS
+)
+
+
+def _tools_for(is_admin: bool) -> list[dict]:
+    return _TOOLS_OPENAI_ADMIN if is_admin else _TOOLS_OPENAI_CUSTOMER
 
 
 def _log_tool_call(conversation_id: str, tool_name: str, arguments: dict, result: dict) -> None:
@@ -136,7 +204,13 @@ def _log_tool_call(conversation_id: str, tool_name: str, arguments: dict, result
         conn.commit()
 
 
-def _execute_tool(conversation_id: str, customer_id: str | None, tool_name: str, tool_input: dict) -> dict:
+def _execute_tool(
+    conversation_id: str,
+    customer_id: str | None,
+    tool_name: str,
+    tool_input: dict,
+    is_admin: bool = False,
+) -> dict:
     fn = _TOOL_IMPL.get(tool_name)
     if fn is None:
         result = {"error": "unknown_tool", "message": f"No such tool: {tool_name}"}
@@ -144,6 +218,16 @@ def _execute_tool(conversation_id: str, customer_id: str | None, tool_name: str,
         return result
 
     kwargs = dict(tool_input)
+    # Checked FIRST, and independently of what was advertised to the model, so a
+    # hallucinated or replayed admin tool name is rejected the same way. Ordering
+    # matters: an anonymous caller invoking an admin tool gets 'forbidden' rather
+    # than 'not_authenticated', which would otherwise leak which tools exist.
+    if tool_name in _ADMIN_ONLY:
+        if not is_admin or not customer_id:
+            result = {"error": "forbidden", "message": "This tool requires staff access."}
+            _log_tool_call(conversation_id, tool_name, tool_input, result)
+            return result
+        kwargs["actor_customer_id"] = customer_id  # injected server-side, agent cannot override this
     if tool_name in _NEEDS_CUSTOMER_ID:
         if not customer_id:
             result = {"error": "not_authenticated", "message": "No authenticated customer for this session."}
@@ -200,7 +284,7 @@ def _should_rotate(exc: Exception) -> bool:
     return False
 
 
-def _call_model(messages: list[dict]):
+def _call_model(messages: list[dict], is_admin: bool = False):
     """One model call, failing over across API keys.
 
     Tries the currently-active key first, then every other key in order.
@@ -211,8 +295,8 @@ def _call_model(messages: list[dict]):
 
     payload = {
         "model": LLM_MODEL,
-        "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
-        "tools": _TOOLS_OPENAI,
+        "messages": [{"role": "system", "content": prompt_for(is_admin)}] + messages,
+        "tools": _tools_for(is_admin),
         "tool_choice": "auto",
     }
 
@@ -241,14 +325,24 @@ def _call_model(messages: list[dict]):
     raise last_exc  # type: ignore[misc]  # unreachable with an empty key list — _CLIENTS is never empty
 
 
-def run_turn(conversation_id: str, customer_id: str | None, user_message: str) -> str:
-    """Run one full user turn (including any tool round-trips) and return the reply text."""
+def run_turn(
+    conversation_id: str,
+    customer_id: str | None,
+    user_message: str,
+    is_admin: bool = False,
+) -> str:
+    """Run one full user turn (including any tool round-trips) and return the reply text.
+
+    `is_admin` comes from the conversation's stored mode, which the API layer has
+    already re-verified against the caller's session role this turn — it is never
+    derived from anything the model or the client said.
+    """
     _save_message(conversation_id, "user", user_message)
 
     messages = _load_history(conversation_id)
 
     for _ in range(MAX_TOOL_ITERATIONS):
-        response = _call_model(messages)
+        response = _call_model(messages, is_admin=is_admin)
         message = response.choices[0].message
 
         if not message.tool_calls:
@@ -282,7 +376,7 @@ def run_turn(conversation_id: str, customer_id: str | None, user_message: str) -
                 tool_input = json.loads(call.function.arguments) if call.function.arguments else {}
             except json.JSONDecodeError:
                 tool_input = {}
-            result = _execute_tool(conversation_id, customer_id, tool_name, tool_input)
+            result = _execute_tool(conversation_id, customer_id, tool_name, tool_input, is_admin=is_admin)
             messages.append(
                 {
                     "role": "tool",

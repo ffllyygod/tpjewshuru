@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Union
 
 import httpx
@@ -182,24 +183,65 @@ def init_auth() -> None:
     )
 
 
-def resolve_customer_id_from_session(session_container: Optional[SessionContainer]) -> Optional[str]:
-    """Bridge a verified SuperTokens session to our own customers.id. Returns
-    None if there's no session (anonymous) — never guesses, never trusts
-    anything other than the session's own verified user record. Sync (uses
+@dataclass(frozen=True)
+class Principal:
+    """Who is making this request, resolved fresh from a verified session.
+
+    Role is re-read from the DB on every request rather than baked into the
+    session token — so revoking someone's admin flag takes effect on their very
+    next turn, not whenever their token happens to expire.
+    """
+
+    customer_id: Optional[str]
+    role: str  # 'anonymous' | 'customer' | 'admin'
+    name: Optional[str] = None
+    email: Optional[str] = None
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == "admin"
+
+
+ANONYMOUS = Principal(customer_id=None, role="anonymous")
+
+
+def resolve_principal_from_session(session_container: Optional[SessionContainer]) -> Principal:
+    """Bridge a verified SuperTokens session to our own customers row. Returns
+    ANONYMOUS if there's no session — never guesses, never trusts anything other
+    than the session's own verified user record. Sync (uses
     supertokens_python.syncio, not asyncio) to match this API's existing
     sync endpoint style — src/api/main.py's handlers are plain `def`, not
-    `async def`, same as everywhere else DB calls happen in this codebase."""
+    `async def`, same as everywhere else DB calls happen in this codebase.
+
+    Fails closed: a verified email with no matching customer row degrades to
+    anonymous rather than erroring.
+    """
     if session_container is None:
-        return None
+        return ANONYMOUS
 
     from supertokens_python.syncio import get_user
 
     user = get_user(session_container.get_user_id())
     if not user or not user.emails:
-        return None
+        return ANONYMOUS
 
     email = user.emails[0]
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT id FROM customers WHERE email = %s", (email,))
+        cur.execute("SELECT id, name, role FROM customers WHERE email = %s", (email,))
         row = cur.fetchone()
-    return str(row["id"]) if row else None
+    if not row:
+        return ANONYMOUS
+
+    return Principal(
+        customer_id=str(row["id"]),
+        role=row["role"],
+        name=row["name"],
+        email=email,
+    )
+
+
+def resolve_customer_id_from_session(session_container: Optional[SessionContainer]) -> Optional[str]:
+    """Back-compat wrapper over resolve_principal_from_session — same contract
+    as before (customer id or None). Kept so existing callers and tests that
+    patch this name keep working."""
+    return resolve_principal_from_session(session_container).customer_id

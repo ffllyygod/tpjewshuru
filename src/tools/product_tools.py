@@ -38,8 +38,13 @@ def search_products(
     min_price: float | None = None,
     limit: int = 5,
 ) -> dict:
-    """Search/recommend products by category, metal, stone, and/or price range (in rupees)."""
-    clauses = []
+    """Search/recommend products by category, metal, stone, and/or price range (in rupees).
+
+    Discontinued products (active = false) are never returned — an admin can
+    soft-delete a product without breaking the order_items rows that FK it.
+    """
+    # Always applied, never model-controllable.
+    clauses = ["active = true"]
     params: list = []
 
     if category:
