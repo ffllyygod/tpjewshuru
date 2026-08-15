@@ -6,6 +6,49 @@ debugging this at 2am, and interview-me explaining design choices out loud.
 
 ---
 
+## 2026-08-15 (deploy) — Migrating a live database with no migration framework
+
+The admin persona needed six schema changes against a deployed database holding
+23 real orders. `schema.sql` is applied wholesale and `--reset` drops the schema
+first, so the normal path was not available: CLAUDE.md's standing rule against
+pointing `seed_db.py --reset` at the deployed `DATABASE_URL` is exactly this
+situation.
+
+`scripts/migrate_to_admin_schema.py` does the one job — bring an existing
+database up to the current schema in place. Every step is `IF NOT EXISTS` or
+checks `pg_constraint` first, so it's idempotent, and it is strictly additive:
+no DROP TABLE, no DELETE. The single constraint it drops is replaced in the same
+transaction by a strictly more permissive one, so no existing row can fail
+validation.
+
+**It was validated before it ever touched prod**, by replaying the actual
+upgrade: a scratch database built from `git show 3b37f76:src/db/schema.sql` (the
+pre-admin schema), seeded with representative rows including the lowercase
+`payment_status = 'paid'` that really existed live. After migrating, the column
+structure was compared against a freshly-created database and matched exactly —
+nothing missing, nothing extra. That comparison is what makes this trustworthy;
+reading the script and believing it would not have been.
+
+Two details worth keeping:
+
+- The old coupon constraint was **unnamed**, so Postgres had generated
+  `coupons_check1`. The script finds it by definition (`LIKE '%num_nonnulls%'`)
+  rather than assuming a name, which is the only way this works across
+  environments where the generated suffix might differ.
+- `payment_status` had to be uppercased *before* the CHECK was added, or the
+  constraint fails to validate against existing rows.
+
+Deploy ordering that mattered: the migration is backwards-compatible (old code
+ignores the new columns), so the database could go first and the API keep
+serving throughout. Confirmed after: anonymous request for `mode="admin"`
+returns 403 in production, and a normal chat turn still completes.
+
+Also relevant: `railway redeploy` re-runs the **previous build**. That caused a
+production outage earlier in this project. `railway up -s api --detach` is the
+one that ships current code.
+
+---
+
 ## 2026-08-15 (frontend) — Making the two personas visible
 
 Merged `admin-persona` to `main` and made the web app role-aware. Small diff,
