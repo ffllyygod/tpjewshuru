@@ -88,7 +88,7 @@ def offer_settlement_options(customer_id: str, order_number: str) -> dict:
     return {
         "already_settled": False,
         "source_type": source_type,
-        "currency": "USD",
+        "currency": "INR",
         "cash_refund_cents": order["total_amount_cents"],
         "cash_refund_note": "Cash refund typically takes 5-7 business days to process.",
         "coupon_total_cents": coupon_total_cents,
@@ -163,7 +163,7 @@ def issue_coupon(customer_id: str, order_number: str, conversation_id: str) -> d
         "issued": True,
         "already_existed": False,
         "coupon_code": code,
-        "currency": "USD",
+        "currency": "INR",
         "total_cents": total_cents,
         "bonus_percent": float(bonus_percent),
         "expires_at": expires_at.isoformat(),
@@ -207,7 +207,7 @@ def get_my_coupons(customer_id: str) -> dict:
         rows = cur.fetchall()
 
     return {
-        "currency": "USD",
+        "currency": "INR",
         "coupons": [
             {
                 "code": r["code"],
@@ -286,7 +286,7 @@ def redeem_coupon(customer_id: str, code: str, order_number: str) -> dict:
 
     return {
         "redeemed": True,
-        "currency": "USD",
+        "currency": "INR",
         "order_number": order_number,
         "discount_cents": deduction,
         "coupon_remaining_cents": updated["remaining_cents"],

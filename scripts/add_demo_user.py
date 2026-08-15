@@ -31,7 +31,7 @@ NEW_PRODUCTS = [
         "name": "Rose Gold Diamond Solitaire Ring",
         "category": "ring",
         "description": "Rose Gold Diamond Solitaire Ring — handcrafted, a 1.2ct round-cut diamond set in 18k rose gold.",
-        "price_cents": 285_000,
+        "price_cents": 32_500_000,  # ₹3,25,000 (price_cents = paise)
         "metal": "rose_gold",
         "stone": "diamond",
         "sizes_available": ["5", "6", "7", "8", "9", "10"],
@@ -42,7 +42,7 @@ NEW_PRODUCTS = [
         "name": "Gold Tennis Necklace",
         "category": "necklace",
         "description": "Gold Tennis Necklace — handcrafted, continuous line of diamonds in 18k gold.",
-        "price_cents": 420_000,
+        "price_cents": 48_000_000,  # ₹4,80,000 (price_cents = paise)
         "metal": "gold",
         "stone": "diamond",
         "sizes_available": None,

@@ -6,6 +6,37 @@ debugging this at 2am, and interview-me explaining design choices out loud.
 
 ---
 
+## 2026-08-15 (branch: coupon-redeem-system, continued) — Switched store currency to INR
+
+Everything (`products.price_cents`, `orders.total_amount_cents`, coupon
+amounts, cash refund amounts) was USD-denominated by default from the
+original seed script. Given this is an Indian jewellery business (matches
+the earlier gold/silver-rates-in-INR request), switched properly rather
+than just relabeling — a $150-$8000 range doesn't map to sensible rupee
+figures for real jewellery, so `seed_db.py`'s price generation was
+rescaled to ₹15,000-₹8,00,000 (paise, same `price_cents` column/convention
+— "cents" now means the smallest INR unit, paise; not renaming the column
+since that would ripple through every money field in the schema for no
+functional benefit, same reasoning Stripe uses "amount in smallest unit"
+generically across currencies). Demo user's two named products and the
+Shipping/Engraving FAQ docs' dollar figures were also converted to
+realistic INR amounts, not just multiplied blindly.
+
+Added `"currency": "INR"` to every money-returning coupon/purchase tool
+response (same fix pattern as the earlier USD/INR mixup bug — state units
+explicitly in tool output, don't rely on the model inferring them). System
+prompt now has one precise rule instead of the old two-currency one: paise
+fields (`*_cents`) need ÷100 and Indian digit grouping (₹3,25,000, not
+₹325,000); `get_metal_rates`' rupee-per-gram figures are NOT in paise and
+must not be divided.
+
+Live-reverified: order list, cancellation, and settlement offer all showed
+correct ₹ amounts with correct Indian-style grouping and correct math
+(₹3,25,000 order → ₹3,57,500 coupon offer, exactly the 10% bonus) —
+checked against Postgres directly (`total_amount_cents = 32500000`), not
+just the reply text. 27/27 tests still pass (one test had a hardcoded
+`max_price=3000` left over from the USD range — updated to the new scale).
+
 ## 2026-08-15 (branch: coupon-redeem-system) — Coupon-instead-of-refund system
 
 **Business case:** cash refund = real money leaves the business, no guarantee

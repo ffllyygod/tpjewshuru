@@ -67,7 +67,10 @@ def seed_products(conn: psycopg.Connection, count: int = 24) -> list[dict]:
                 f" with {stone.title()}" if stone != "none" else ""
             )
             sku = f"TPJ-{category[:3].upper()}-{1000 + i}"
-            price_cents = random.randint(15_000, 800_000)  # $150 - $8000
+            # price_cents stores the smallest currency unit — paise, since this
+            # store prices in INR. Range is realistic Indian retail jewellery
+            # pricing (₹15,000 - ₹8,00,000), not a relabeled USD range.
+            price_cents = random.randint(1_500_000, 80_000_000)  # ₹15,000 - ₹8,00,000
 
             sizes_available = RING_SIZES if has_sizes else None
             if has_sizes:
@@ -296,8 +299,8 @@ daily-worn rings.""",
     (
         "Shipping FAQ",
         "faq",
-        """Standard shipping takes 3-5 business days within the US; expedited
-options are available at checkout. All orders over $500 ship fully insured
+        """Standard shipping takes 3-5 business days within India; expedited
+options are available at checkout. All orders over ₹40,000 ship fully insured
 and require a signature on delivery. International shipping is available to
 select countries and typically takes 7-14 business days, with customs duties
 the responsibility of the recipient. You'll receive a tracking link by email
@@ -307,7 +310,7 @@ as soon as your order ships.""",
         "Engraving FAQ",
         "faq",
         """Most rings and pendants can be engraved with up to 20 characters at
-checkout for a flat $25 fee. Engraved items take an additional 2-3 business
+checkout for a flat ₹2,000 fee. Engraved items take an additional 2-3 business
 days to produce and, because they're made to order, cannot be cancelled or
 returned unless defective. Preview your engraving text carefully at
 checkout — we are not able to modify it once production has started.""",

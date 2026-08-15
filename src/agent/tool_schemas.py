@@ -134,15 +134,15 @@ TOOLS = [
     },
     {
         "name": "search_products",
-        "description": "Browse/recommend products from the catalog by category, metal, stone, and/or price range. Use this when the customer wants suggestions or is browsing (e.g. 'show me rings under $2000', 'gold necklaces with diamonds').",
+        "description": "Browse/recommend products from the catalog by category, metal, stone, and/or price range. Use this when the customer wants suggestions or is browsing (e.g. 'show me rings under ₹2,00,000', 'gold necklaces with diamonds').",
         "input_schema": {
             "type": "object",
             "properties": {
                 "category": {"type": "string", "enum": ["ring", "necklace", "earring", "bracelet", "bangle", "pendant"]},
                 "metal": {"type": "string", "enum": ["gold", "silver", "platinum", "rose_gold"]},
                 "stone": {"type": "string", "enum": ["diamond", "ruby", "emerald", "sapphire", "none"]},
-                "min_price": {"type": "number", "description": "Minimum price in dollars."},
-                "max_price": {"type": "number", "description": "Maximum price in dollars."},
+                "min_price": {"type": "number", "description": "Minimum price in rupees."},
+                "max_price": {"type": "number", "description": "Maximum price in rupees."},
             },
         },
     },

@@ -36,7 +36,7 @@ def search_products(
     min_price: float | None = None,
     limit: int = 5,
 ) -> dict:
-    """Search/recommend products by category, metal, stone, and/or price range (in dollars)."""
+    """Search/recommend products by category, metal, stone, and/or price range (in rupees)."""
     clauses = []
     params: list = []
 

@@ -143,10 +143,13 @@ def test_knowledge_search_finds_ring_sizing():
 
 
 def test_product_search_by_category_and_price():
-    result = product_tools.search_products(category="ring", max_price=3000)
+    # max_price set to the top of seed_db.py's price range (₹15,000-₹8,00,000)
+    # so this is guaranteed to match at least one ring regardless of the
+    # random prices rolled this seed run.
+    result = product_tools.search_products(category="ring", max_price=800_000)
     assert result["count"] >= 1
     assert all(r["category"] == "ring" for r in result["results"])
-    assert all(r["price"] <= 3000 for r in result["results"])
+    assert all(r["price"] <= 800_000 for r in result["results"])
 
 
 def test_product_search_demo_ring_findable():

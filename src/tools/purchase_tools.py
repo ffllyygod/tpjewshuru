@@ -104,7 +104,7 @@ def place_order(customer_id: str, sku: str, quantity: int = 1, size: str | None 
 
     result = {
         "placed": True,
-        "currency": "USD",
+        "currency": "INR",
         "order_number": order_number,
         "total_amount_cents": total_amount_cents,
         "placed_at": order["placed_at"].isoformat(),
