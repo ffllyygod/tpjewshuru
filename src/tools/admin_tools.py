@@ -1251,6 +1251,10 @@ def _validate_goodwill_amount(amount_rupees) -> tuple[int | None, dict | None]:
                 "chat-issued goodwill coupon. No coupon was created. Anything larger has to be "
                 "authorised outside this assistant."
             ),
+            # The rejected amount gets a _display too. The model will quote it
+            # back when explaining the refusal, and every rupee figure it says
+            # should come from a field rather than its own formatting.
+            "requested_display": format_inr(cents),
             "cap_display": format_inr(ADMIN_COUPON_MAX_CENTS),
         }
     return cents, None

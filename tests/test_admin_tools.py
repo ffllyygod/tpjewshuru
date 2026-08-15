@@ -38,11 +38,17 @@ def test_sales_summary_matches_direct_sql():
     result = admin_tools.admin_sales_summary(ACTOR, period="year")
 
     with get_conn() as conn, conn.cursor() as cur:
+        # date_trunc, not a bare `now() - interval '365 days'`, because the tool
+        # truncates its start boundary to midnight — a period that began
+        # mid-afternoon would be a strange thing to report on. Comparing against
+        # the untruncated boundary made this test pass or fail depending on the
+        # time of day the database happened to be seeded, since any order landing
+        # in the few-hour gap counts for one side and not the other.
         cur.execute(
             """
             SELECT COUNT(*), COALESCE(SUM(total_amount_cents - discount_cents), 0)
             FROM orders
-            WHERE placed_at >= now() - interval '365 days'
+            WHERE placed_at >= date_trunc('day', now() - interval '365 days')
               AND status NOT IN ('CANCELLED', 'RETURNED')
             """
         )
