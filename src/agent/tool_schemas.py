@@ -245,3 +245,158 @@ TOOLS = [
         },
     },
 ]
+
+# ---------------------------------------------------------------------------
+# Staff-only tools. Advertised ONLY to admin-mode conversations (see
+# orchestrator._tools_for) and enforced by orchestrator._ADMIN_ONLY.
+#
+# `actor_customer_id` is deliberately absent from every schema below, for the
+# same reason `customer_id` is absent from the customer schemas: the agent does
+# not get to choose who it is acting as. The orchestrator injects it from the
+# verified session.
+# ---------------------------------------------------------------------------
+
+_PERIOD_DESC = (
+    "One of: today, week, month, quarter, year, last_month, last_12_months, custom. "
+    "Use 'custom' with start_date and end_date (YYYY-MM-DD) for anything else."
+)
+
+ADMIN_TOOLS = [
+    {
+        "name": "admin_sales_summary",
+        "description": (
+            "Headline sales figures for a period — order count, net revenue, average order value, "
+            "cancellations, returns — plus a comparison against the previous period of the same "
+            "length. Use this for 'how were sales last month', 'how are we doing this week', "
+            "'what's our revenue this quarter'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "period": {"type": "string", "description": _PERIOD_DESC},
+                "start_date": {"type": "string", "description": "YYYY-MM-DD, only with period='custom'."},
+                "end_date": {"type": "string", "description": "YYYY-MM-DD, only with period='custom'."},
+            },
+            "required": ["period"],
+        },
+    },
+    {
+        "name": "admin_sales_breakdown",
+        "description": (
+            "Revenue broken down by ONE dimension. dimension='category' answers 'revenue by "
+            "category'; 'product' answers 'top selling products'; 'customer' answers 'who are our "
+            "best customers'; 'month' answers 'monthly sales trend'; 'metal' answers 'gold vs "
+            "silver'; 'status' answers 'how many orders were cancelled'. Pick the dimension that "
+            "matches what was actually asked — don't substitute a different one."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dimension": {
+                    "type": "string",
+                    "enum": ["month", "category", "metal", "product", "customer", "status"],
+                },
+                "period": {"type": "string", "description": _PERIOD_DESC},
+                "start_date": {"type": "string"},
+                "end_date": {"type": "string"},
+                "limit": {"type": "integer", "description": "Max rows, default 10."},
+            },
+            "required": ["dimension", "period"],
+        },
+    },
+    {
+        "name": "admin_inventory_status",
+        "description": (
+            "Stock levels across the catalogue. filter='low_stock' (at or below each product's "
+            "threshold), 'out_of_stock' (zero), or 'all'. Use for 'what's running low', 'what's "
+            "out of stock', 'stock levels for rings'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filter": {"type": "string", "enum": ["low_stock", "out_of_stock", "all"]},
+                "category": {
+                    "type": "string",
+                    "enum": ["ring", "necklace", "earring", "bracelet", "bangle", "pendant"],
+                },
+                "limit": {"type": "integer"},
+            },
+            "required": ["filter"],
+        },
+    },
+    {
+        "name": "admin_find_orders",
+        "description": (
+            "Search orders across ALL customers, filtered by status, customer email, and/or date "
+            "range. Use for 'show me cancelled orders this week', 'what has this customer ordered'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["PLACED", "CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED", "RETURNED"],
+                },
+                "customer_email": {"type": "string"},
+                "start_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "end_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "limit": {"type": "integer"},
+            },
+        },
+    },
+    {
+        "name": "admin_order_detail",
+        "description": (
+            "Full detail for one order by order_number, including which customer it belongs to, "
+            "its line items, and its complete status history. order_number looks like TPJ-123456 "
+            "or TPJ-H00123 — it is NOT a product SKU (e.g. TPJ-RIN-1010 is a SKU)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"order_number": {"type": "string"}},
+            "required": ["order_number"],
+        },
+    },
+    {
+        "name": "admin_find_customer",
+        "description": (
+            "Find customers by name, email or phone, with their order count and lifetime spend. "
+            "Returns only a masked phone number — use admin_customer_profile for full details on "
+            "one specific person."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Name, email, or phone fragment."},
+                "limit": {"type": "integer"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "admin_customer_profile",
+        "description": (
+            "Everything about ONE customer, looked up by their exact email address: recent orders, "
+            "coupons, Gold SIP subscriptions, and lifetime value. Use admin_find_customer first if "
+            "you don't already have the exact email."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"customer_email": {"type": "string"}},
+            "required": ["customer_email"],
+        },
+    },
+    {
+        "name": "admin_bot_stats",
+        "description": (
+            "Aggregate chatbot usage for a period: conversation count, tool-call volume, most-used "
+            "tools, and error rate. Returns NO conversation content — customers' messages are not "
+            "accessible through this assistant."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"period": {"type": "string", "description": _PERIOD_DESC}},
+            "required": ["period"],
+        },
+    },
+]

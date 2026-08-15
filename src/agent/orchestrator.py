@@ -36,9 +36,9 @@ from openai import (
 from psycopg.rows import dict_row
 
 from src.agent.system_prompt import prompt_for
-from src.agent.tool_schemas import TOOLS
+from src.agent.tool_schemas import ADMIN_TOOLS, TOOLS
 from src.db.connection import get_conn
-from src.tools import coupon_tools, gold_sip_tools, knowledge_tools, market_tools, order_tools, product_tools, purchase_tools
+from src.tools import admin_tools, coupon_tools, gold_sip_tools, knowledge_tools, market_tools, order_tools, product_tools, purchase_tools
 
 LLM_MODEL = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
@@ -118,6 +118,16 @@ _TOOL_IMPL = {
     "get_my_gold_sips": gold_sip_tools.get_my_gold_sips,
     "cancel_gold_sip": gold_sip_tools.cancel_gold_sip,
     "redeem_gold_sip": gold_sip_tools.redeem_gold_sip,
+    # Staff-only — gated by _ADMIN_ONLY below, never reachable from a customer
+    # conversation regardless of what the model emits.
+    "admin_sales_summary": admin_tools.admin_sales_summary,
+    "admin_sales_breakdown": admin_tools.admin_sales_breakdown,
+    "admin_inventory_status": admin_tools.admin_inventory_status,
+    "admin_find_orders": admin_tools.admin_find_orders,
+    "admin_order_detail": admin_tools.admin_order_detail,
+    "admin_find_customer": admin_tools.admin_find_customer,
+    "admin_customer_profile": admin_tools.admin_customer_profile,
+    "admin_bot_stats": admin_tools.admin_bot_stats,
 }
 _NEEDS_CUSTOMER_ID = {
     "list_customer_orders", "get_order_status", "check_cancellation_eligibility", "cancel_order",
@@ -134,7 +144,7 @@ _NEEDS_CONVERSATION_ID = {"check_cancellation_eligibility", "cancel_order", "iss
 # admin tools receive `actor_customer_id` (WHO is acting), never `customer_id`
 # (WHOSE data). Keeping those two names distinct is what preserves the meaning
 # of `customer_id` as "the scope of this query" everywhere else in the codebase.
-_ADMIN_ONLY: set[str] = set()
+_ADMIN_ONLY: set[str] = {t["name"] for t in ADMIN_TOOLS}
 
 # Tool names each persona is allowed to see. Filtering the advertised list is an
 # ACCURACY measure, not a security one — the _ADMIN_ONLY check in _execute_tool
@@ -152,8 +162,13 @@ _CUSTOMER_ONLY = {
     "start_gold_sip", "pay_sip_installment", "get_my_gold_sips", "cancel_gold_sip", "redeem_gold_sip",
 }
 
+# TOOLS holds only customer/shared tools; ADMIN_TOOLS is a separate list, so the
+# customer persona cannot accidentally inherit a staff tool by someone appending
+# to the wrong list.
 _TOOLS_OPENAI_CUSTOMER = _to_openai([t for t in TOOLS if t["name"] not in _ADMIN_ONLY])
-_TOOLS_OPENAI_ADMIN = _to_openai([t for t in TOOLS if t["name"] not in _CUSTOMER_ONLY])
+_TOOLS_OPENAI_ADMIN = _to_openai(
+    [t for t in TOOLS if t["name"] not in _CUSTOMER_ONLY] + ADMIN_TOOLS
+)
 
 
 def _tools_for(is_admin: bool) -> list[dict]:
