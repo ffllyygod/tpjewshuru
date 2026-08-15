@@ -399,4 +399,146 @@ ADMIN_TOOLS = [
             "required": ["period"],
         },
     },
+
+    # -----------------------------------------------------------------------
+    # Writes. Each is a preview/apply pair; `conversation_id` is absent from
+    # every schema below for the same reason `actor_customer_id` is — the
+    # orchestrator injects it, and it is what scopes the confirmation to this
+    # conversation. A model that could choose it could replay a confirmation
+    # from someone else's session.
+    # -----------------------------------------------------------------------
+    {
+        "name": "admin_preview_order_cancellation",
+        "description": (
+            "STEP 1 of cancelling any customer's order. Read-only: shows who the order belongs to, "
+            "its status and total, and what would change. Call this FIRST, tell the staff member "
+            "what it says, and wait for them to confirm before calling admin_cancel_order."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order_number": {"type": "string", "description": "e.g. TPJ-123456. NOT a product SKU."},
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Why this is being cancelled, in the staff member's own words (e.g. "
+                        "'customer called, ordered the wrong size'). Written to the permanent "
+                        "audit log. Ask them if they haven't said."
+                    ),
+                },
+            },
+            "required": ["order_number", "reason"],
+        },
+    },
+    {
+        "name": "admin_cancel_order",
+        "description": (
+            "STEP 2 — actually cancels any customer's order, overriding the 24-hour window "
+            "customers are held to. Only call after admin_preview_order_cancellation in this same "
+            "conversation AND an explicit yes from the staff member in a separate message. Pass "
+            "the SAME order_number and the SAME reason you previewed; different values are "
+            "rejected. Does not refund anything — settlement is separate."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order_number": {"type": "string"},
+                "reason": {"type": "string", "description": "Must match the reason given to the preview, verbatim."},
+            },
+            "required": ["order_number", "reason"],
+        },
+    },
+    {
+        "name": "admin_preview_stock_adjustment",
+        "description": (
+            "STEP 1 of correcting stock on hand. Read-only: shows the product's current quantity "
+            "for that size and what it would become. Use admin_inventory_status first if you don't "
+            "already have the exact SKU."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sku": {"type": "string", "description": "Product SKU, e.g. TPJ-RIN-1010."},
+                "new_quantity": {
+                    "type": "integer",
+                    "description": "The absolute quantity to set, NOT a delta to add or subtract.",
+                },
+                "size": {
+                    "type": "string",
+                    "description": (
+                        "Which size to adjust. Omit for products stocked without sizes; required "
+                        "when a product has several, and the error will list the valid ones."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why (e.g. 'stock count found 3 extra'). Written to the audit log.",
+                },
+            },
+            "required": ["sku", "new_quantity", "reason"],
+        },
+    },
+    {
+        "name": "admin_adjust_stock",
+        "description": (
+            "STEP 2 — sets the on-hand quantity for one product and size. Only call after "
+            "admin_preview_stock_adjustment in this conversation AND an explicit yes from the "
+            "staff member. Pass the SAME sku, size, quantity and reason you previewed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sku": {"type": "string"},
+                "new_quantity": {"type": "integer"},
+                "size": {"type": "string"},
+                "reason": {"type": "string", "description": "Must match the reason given to the preview, verbatim."},
+            },
+            "required": ["sku", "new_quantity", "reason"],
+        },
+    },
+    {
+        "name": "admin_preview_goodwill_coupon",
+        "description": (
+            "STEP 1 of giving a customer store credit as a goodwill gesture (a delayed delivery, a "
+            "service complaint) — NOT tied to any order and NOT a refund. Read-only: confirms who "
+            "the customer is and what the coupon would be worth. Creates nothing. Use "
+            "admin_find_customer first to get their exact email."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "customer_email": {"type": "string", "description": "The customer's exact email address."},
+                "amount_rupees": {
+                    "type": "integer",
+                    "description": (
+                        "Whole rupees, NOT paise — pass 5000 for ₹5,000. There is a per-coupon cap; "
+                        "an amount over it is refused outright rather than trimmed."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why the goodwill credit is being given. Written to the audit log.",
+                },
+            },
+            "required": ["customer_email", "amount_rupees", "reason"],
+        },
+    },
+    {
+        "name": "admin_issue_goodwill_coupon",
+        "description": (
+            "STEP 2 — actually creates the store-credit coupon and returns its code. Only call "
+            "after admin_preview_goodwill_coupon in this conversation AND an explicit yes from the "
+            "staff member. Pass the SAME email, amount and reason you previewed — a different "
+            "amount is rejected, not silently issued."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "customer_email": {"type": "string"},
+                "amount_rupees": {"type": "integer", "description": "Whole rupees. Must match the previewed amount."},
+                "reason": {"type": "string", "description": "Must match the reason given to the preview, verbatim."},
+            },
+            "required": ["customer_email", "amount_rupees", "reason"],
+        },
+    },
 ]

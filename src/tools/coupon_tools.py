@@ -44,7 +44,7 @@ from src.tools.formatting import format_inr
 SETTLEMENT_SOURCE_STATUSES = {"CANCELLED": "cancellation", "RETURNED": "return"}
 
 
-def _get_policy(cur) -> dict:
+def get_policy(cur) -> dict:
     cur.execute("SELECT * FROM coupon_policy WHERE name = 'default'")
     policy = cur.fetchone()
     if not policy:
@@ -63,16 +63,30 @@ def mint_coupon(
     source_order_id: str | None = None,
     source_subscription_id: str | None = None,
 ) -> dict:
-    """Insert a new coupon row for either an order or a Gold SIP subscription
-    source (exactly one must be given — matches the `coupons` table's CHECK).
-    Shared by `issue_coupon` (order-based) and
-    `gold_sip_tools.cancel_gold_sip` (subscription-based, no bonus).
+    """Insert a new coupon row for an order source, a Gold SIP subscription
+    source, or — for `source_type='goodwill'` only — no source at all. Exactly
+    the shape of the `coupons_source_matches_type` CHECK, which is the real
+    enforcement; the assertion below just turns a violation into a legible
+    error instead of a Postgres constraint traceback.
+
+    Shared by `issue_coupon` (order-based), `gold_sip_tools.cancel_gold_sip`
+    (subscription-based, no bonus), and `admin_tools.admin_issue_goodwill_coupon`
+    (sourceless, staff-issued).
 
     Raises on a source-uniqueness conflict (the partial unique indexes on
     coupons.source_order_id / source_subscription_id) — callers handle the
     idempotent "someone already issued one" fallback themselves, since the
-    re-lookup query differs by which source column is in play.
+    re-lookup query differs by which source column is in play. Goodwill coupons
+    have no source column and so are deliberately NOT deduplicated here; the
+    admin path gates repeat issuance with a single-use confirmation token
+    instead.
     """
+    sources = sum(x is not None for x in (source_order_id, source_subscription_id))
+    expected = 0 if source_type == "goodwill" else 1
+    if sources != expected:
+        raise ValueError(
+            f"source_type='{source_type}' requires exactly {expected} source id, got {sources}."
+        )
     total_cents = round(amount_cents * (1 + float(bonus_percent) / 100))
     code = f"TPJ-CPN-{secrets.token_urlsafe(9).replace('_', '').replace('-', '').upper()[:12]}"
     expires_at = datetime.now(timezone.utc) + timedelta(days=expiry_days)
@@ -120,7 +134,7 @@ def offer_settlement_options(customer_id: str, order_number: str) -> dict:
                 "coupon_status": existing["status"],
             }
 
-        policy = _get_policy(cur)
+        policy = get_policy(cur)
         bonus_percent = policy["cancellation_bonus_percent"] if source_type == "cancellation" else policy["return_bonus_percent"]
         coupon_total_cents = round(order["total_amount_cents"] * (1 + float(bonus_percent) / 100))
 
@@ -167,7 +181,7 @@ def issue_coupon(customer_id: str, order_number: str, conversation_id: str) -> d
                 "expires_at": existing["expires_at"].isoformat(),
             }
 
-        policy = _get_policy(cur)
+        policy = get_policy(cur)
         bonus_percent = policy["cancellation_bonus_percent"] if source_type == "cancellation" else policy["return_bonus_percent"]
 
         try:

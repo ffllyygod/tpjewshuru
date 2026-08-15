@@ -23,11 +23,14 @@ Access is enforced in src/agent/orchestrator.py's `_execute_tool` via
 
 from __future__ import annotations
 
+import json
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from psycopg.rows import dict_row
 
 from src.db.connection import get_conn
+from src.tools.coupon_tools import get_policy, mint_coupon
 from src.tools.formatting import format_inr
 
 # Revenue always excludes cancelled and returned orders, and is always net of
@@ -727,4 +730,658 @@ def admin_bot_stats(actor_customer_id: str, period: str = "week") -> dict:
             {"tool_name": t["tool_name"], "calls": t["calls"], "errors": t["errors"]} for t in tools
         ],
         "note": "Aggregate only — conversation contents are not accessible.",
+    }
+
+
+# ===========================================================================
+# WRITES
+# ===========================================================================
+# Everything above reads. Everything below changes data belonging to a customer
+# who is not in the conversation and cannot object, so each one is a
+# preview/apply pair sharing four properties:
+#
+#   1. The preview mints a single-use confirmation token scoped to
+#      (conversation, action, target) — the same table and shape as customer
+#      cancellation, so there is one confirmation mechanism in this codebase,
+#      not two.
+#   2. The token also carries the previewed PARAMS. The apply re-derives its
+#      effect from those, and refuses if the arguments it was called with have
+#      drifted. Without this, a token minted by previewing "₹500 to Priya" would
+#      equally authorise "₹50,000 to Priya" — same conversation, same action,
+#      same target id.
+#   3. The apply re-validates every precondition from scratch. The token proves
+#      a preview happened; it never substitutes for re-checking.
+#   4. Every successful write inserts an admin_action_log row with before_state,
+#      after_state, the actor, and a non-empty reason.
+#
+# The honest limitation, carried over from customer cancellation: the token
+# proves the preview ran in this conversation, NOT that a human said yes in
+# between. That step is prompt-enforced only. What the token does buy is that a
+# single confused turn cannot both discover a target and mutate it.
+
+ADMIN_TOKEN_TTL_MINUTES = 10
+
+# Value caps. A cap is not a substitute for the confirmation flow — it's the
+# backstop for when the flow is followed and the number is still wrong, which is
+# the realistic failure here (a misplaced decimal in a model-supplied amount is
+# far likelier than a forged token).
+ADMIN_COUPON_MAX_CENTS = 5_000_000        # ₹50,000 per goodwill coupon
+ADMIN_STOCK_MAX_QUANTITY = 500            # per size, per product
+
+# Staff can cancel later in the lifecycle than a customer can (that is the whole
+# point of an override) — but DELIVERED is a return, not a cancellation, and a
+# terminal status is not re-cancellable.
+ADMIN_CANCELLABLE_STATUSES = {"PLACED", "CONFIRMED", "SHIPPED"}
+
+_MIN_REASON_CHARS = 3
+
+
+def _clean_reason(reason: str | None) -> str:
+    """admin_action_log.reason is NOT NULL for a reason: an audit row that
+    doesn't say why is a row nobody can act on six months later."""
+    text = (reason or "").strip()
+    if len(text) < _MIN_REASON_CHARS:
+        raise ValueError(
+            "A reason is required and must be a real explanation (e.g. 'customer "
+            "called, wrong size ordered') — it is written to the permanent audit log."
+        )
+    return text[:500]
+
+
+def _mint_token(cur, conversation_id: str, action: str, target_id: str, params: dict) -> str:
+    token = secrets.token_urlsafe(16)
+    cur.execute(
+        """
+        INSERT INTO confirmation_tokens (conversation_id, action, target_id, params, token, expires_at)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (
+            conversation_id, action, target_id, json.dumps(params, default=str), token,
+            datetime.now(timezone.utc) + timedelta(minutes=ADMIN_TOKEN_TTL_MINUTES),
+        ),
+    )
+    return token
+
+
+def _claim_token(cur, conversation_id: str, action: str, target_id: str, params: dict):
+    """Find the pending confirmation for this exact (conversation, action,
+    target) and check it still authorises exactly `params`.
+
+    Returns (token_id, None) on success or (None, error_dict) on failure. The
+    caller burns the token as part of its own transaction — deliberately not
+    here, so a write that fails re-validation after this point leaves the
+    confirmation intact rather than forcing the staff member to preview again.
+    """
+    cur.execute(
+        """
+        SELECT id, params, expires_at, used_at
+        FROM confirmation_tokens
+        WHERE conversation_id = %s AND action = %s AND target_id = %s
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (conversation_id, action, target_id),
+    )
+    tok = cur.fetchone()
+    if not tok:
+        return None, {
+            "applied": False,
+            "reason": "no_pending_confirmation",
+            "message": (
+                f"No {action} was previewed for this target in this conversation. "
+                "Call the matching preview tool first, and confirm with the staff member."
+            ),
+        }
+    if tok["used_at"] is not None:
+        return None, {
+            "applied": False,
+            "reason": "token_used",
+            "message": "That confirmation was already used — this change has been applied once already.",
+        }
+    if tok["expires_at"] < datetime.now(timezone.utc):
+        return None, {
+            "applied": False,
+            "reason": "token_expired",
+            "message": f"Confirmation expired after {ADMIN_TOKEN_TTL_MINUTES} minutes — preview again.",
+        }
+    # Compared through JSON so the stored jsonb and the fresh dict are the same
+    # shape (ints stay ints, and key order never matters).
+    if json.loads(json.dumps(params, default=str)) != dict(tok["params"] or {}):
+        return None, {
+            "applied": False,
+            "reason": "params_changed",
+            "message": (
+                "These arguments don't match what was previewed and confirmed. "
+                "Preview again with the new values and get a fresh confirmation."
+            ),
+        }
+    return tok["id"], None
+
+
+def _log_admin_action(
+    cur, actor_customer_id: str, conversation_id: str, action: str,
+    target_table: str, target_id: str, before: dict | None, after: dict | None, reason: str,
+) -> None:
+    cur.execute(
+        """
+        INSERT INTO admin_action_log
+          (actor_customer_id, conversation_id, action, target_table, target_id,
+           before_state, after_state, reason)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            actor_customer_id, conversation_id, action, target_table, target_id,
+            json.dumps(before, default=str) if before is not None else None,
+            json.dumps(after, default=str) if after is not None else None,
+            reason,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Write 1 — cancel any customer's order (staff override)
+# ---------------------------------------------------------------------------
+
+
+def _load_order_for_write(cur, order_number: str):
+    cur.execute(
+        """
+        SELECT o.id, o.order_number, o.status::text AS status, o.placed_at, o.payment_status,
+               o.total_amount_cents, o.discount_cents,
+               cu.id AS customer_id, cu.name AS customer_name, cu.email AS customer_email
+        FROM orders o JOIN customers cu ON cu.id = o.customer_id
+        WHERE o.order_number = %s
+        """,
+        (order_number,),
+    )
+    return cur.fetchone()
+
+
+def _order_cancellable(order) -> dict | None:
+    """Shared by preview and apply so the two can't drift on what's allowed."""
+    status = order["status"]
+    if status in ("CANCELLED", "RETURNED"):
+        return {
+            "reason": "already_terminal",
+            "message": f"Order {order['order_number']} is already {status} — nothing to cancel.",
+        }
+    if status == "DELIVERED":
+        return {
+            "reason": "delivered",
+            "message": (
+                f"Order {order['order_number']} has been DELIVERED. A delivered order is handled as "
+                "a return, not a cancellation — this tool cannot cancel it."
+            ),
+        }
+    if status not in ADMIN_CANCELLABLE_STATUSES:
+        return {"reason": "wrong_status", "message": f"Order is {status} and cannot be cancelled."}
+    return None
+
+
+def admin_preview_order_cancellation(
+    actor_customer_id: str, order_number: str, reason: str, conversation_id: str,
+) -> dict:
+    """Show exactly what cancelling this order would do, and mint the
+    confirmation that admin_cancel_order requires. Changes nothing."""
+    try:
+        reason = _clean_reason(reason)
+    except ValueError as e:
+        return {"error": "reason_required", "message": str(e)}
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        order = _load_order_for_write(cur, order_number)
+        if not order:
+            return {"error": "not_found", "message": f"No order {order_number}."}
+        blocked = _order_cancellable(order)
+        if blocked:
+            return {"error": blocked["reason"], "message": blocked["message"]}
+
+        _mint_token(
+            cur, conversation_id, "admin_cancel_order", order["id"], {"reason": reason},
+        )
+        conn.commit()
+
+    _, total_display = _money(order["total_amount_cents"] - order["discount_cents"])
+    return {
+        "preview": True,
+        "order_number": order["order_number"],
+        "customer_name": order["customer_name"],
+        "customer_email": order["customer_email"],
+        "current_status": order["status"],
+        "payment_status": order["payment_status"],
+        "order_total_display": total_display,
+        "placed_at": order["placed_at"],
+        "will_change": [
+            f"Order status {order['status']} -> CANCELLED",
+            "A status-history entry attributing the cancellation to staff",
+            "An audit entry recording you as the staff member and this reason",
+        ],
+        "reason": reason,
+        "staff_override_note": (
+            "This bypasses the 24-hour window customers are held to — it is a staff override "
+            "and is logged as one."
+        ),
+        "settlement_note": (
+            "This does NOT refund anything. Once cancelled, the customer can settle it "
+            "(cash refund or a coupon worth more) through their own chat, or you can issue "
+            "a goodwill coupon separately."
+        ),
+        "confirmation_expires_in_minutes": ADMIN_TOKEN_TTL_MINUTES,
+        "next_step": (
+            "Read this back to the staff member — order number, customer name, and total — "
+            "and ask them to confirm. Only call admin_cancel_order after they say yes."
+        ),
+    }
+
+
+def admin_cancel_order(
+    actor_customer_id: str, order_number: str, reason: str, conversation_id: str,
+) -> dict:
+    """Cancel any customer's order. Requires admin_preview_order_cancellation to
+    have run in this conversation for this order with this same reason."""
+    try:
+        reason = _clean_reason(reason)
+    except ValueError as e:
+        return {"applied": False, "reason": "reason_required", "message": str(e)}
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        order = _load_order_for_write(cur, order_number)
+        if not order:
+            return {"applied": False, "reason": "not_found", "message": f"No order {order_number}."}
+
+        token_id, err = _claim_token(
+            cur, conversation_id, "admin_cancel_order", order["id"], {"reason": reason},
+        )
+        if err:
+            return err
+
+        # Re-validated from scratch: the order may have shipped or been cancelled
+        # by the customer themselves between the preview and this call.
+        blocked = _order_cancellable(order)
+        if blocked:
+            return {"applied": False, **blocked}
+
+        before = {"status": order["status"], "payment_status": order["payment_status"]}
+        cur.execute("UPDATE orders SET status = 'CANCELLED' WHERE id = %s", (order["id"],))
+        cur.execute(
+            """
+            INSERT INTO order_status_history (order_id, from_status, to_status, reason)
+            VALUES (%s, %s, 'CANCELLED', 'admin_cancelled')
+            """,
+            (order["id"], order["status"]),
+        )
+        cur.execute("UPDATE confirmation_tokens SET used_at = now() WHERE id = %s", (token_id,))
+        _log_admin_action(
+            cur, actor_customer_id, conversation_id, "admin_cancel_order", "orders", order["id"],
+            before, {"status": "CANCELLED", "payment_status": order["payment_status"]}, reason,
+        )
+        conn.commit()
+
+    return {
+        "applied": True,
+        "order_number": order["order_number"],
+        "customer_name": order["customer_name"],
+        "previous_status": before["status"],
+        "new_status": "CANCELLED",
+        "reason": reason,
+        "message": (
+            f"Order {order['order_number']} ({order['customer_name']}) is cancelled and the action "
+            "is logged against your account. No money has moved — settlement is a separate step."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Write 2 — stock adjustment
+# ---------------------------------------------------------------------------
+
+
+def _resolve_size(stock: dict, size: str | None) -> tuple[str | None, dict | None]:
+    """Pick which stock_by_size key is being adjusted.
+
+    Unsized products carry a single '_default' key, so requiring the model to
+    supply a size there would be asking it to know an internal convention. With
+    exactly one key there is no ambiguity, so infer it; with several, refuse
+    rather than guess — silently adjusting the wrong size is a real-inventory
+    error nobody would notice.
+    """
+    keys = list(stock or {})
+    if not keys:
+        return None, {"error": "no_stock_record", "message": "This product has no stock records to adjust."}
+    if size is None:
+        if len(keys) == 1:
+            return keys[0], None
+        return None, {
+            "error": "size_required",
+            "message": f"This product is stocked by size. Specify which: {', '.join(sorted(keys))}.",
+        }
+    if size not in stock:
+        return None, {
+            "error": "bad_size",
+            "message": f"No size '{size}' for this product. Valid sizes: {', '.join(sorted(keys))}.",
+        }
+    return size, None
+
+
+def _validate_quantity(new_quantity) -> tuple[int | None, dict | None]:
+    try:
+        qty = int(new_quantity)
+        if qty != float(new_quantity):
+            raise ValueError
+    except (TypeError, ValueError):
+        return None, {"error": "bad_quantity", "message": f"new_quantity must be a whole number, got '{new_quantity}'."}
+    if qty < 0:
+        return None, {"error": "bad_quantity", "message": "new_quantity cannot be negative."}
+    if qty > ADMIN_STOCK_MAX_QUANTITY:
+        return None, {
+            "error": "exceeds_limit",
+            "message": (
+                f"{qty} exceeds the {ADMIN_STOCK_MAX_QUANTITY}-unit per-size cap for a chat-issued "
+                "stock adjustment. Nothing was changed. A larger correction needs to go through "
+                "inventory management directly."
+            ),
+        }
+    return qty, None
+
+
+def _load_product_for_write(cur, sku: str):
+    cur.execute(
+        "SELECT id, sku, name, category, stock_by_size, active FROM products WHERE sku = %s",
+        (sku,),
+    )
+    return cur.fetchone()
+
+
+def admin_preview_stock_adjustment(
+    actor_customer_id: str, sku: str, new_quantity: int, reason: str,
+    conversation_id: str, size: str | None = None,
+) -> dict:
+    """Show the before/after of a stock correction and mint its confirmation.
+    Changes nothing."""
+    try:
+        reason = _clean_reason(reason)
+    except ValueError as e:
+        return {"error": "reason_required", "message": str(e)}
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        product = _load_product_for_write(cur, sku)
+        if not product:
+            return {
+                "error": "not_found",
+                "message": f"No product with SKU '{sku}'. SKUs look like TPJ-RIN-1010 — find it with admin_inventory_status.",
+            }
+        stock = dict(product["stock_by_size"] or {})
+        key, err = _resolve_size(stock, size)
+        if err:
+            return err
+        qty, err = _validate_quantity(new_quantity)
+        if err:
+            return err
+
+        current = int(stock.get(key, 0))
+        if current == qty:
+            # A no-op write would still burn a confirmation and write a
+            # meaningless audit row. Say so instead.
+            return {
+                "error": "no_change",
+                "message": f"{product['name']} size {key} is already at {qty} units — nothing to change.",
+            }
+
+        _mint_token(
+            cur, conversation_id, "admin_adjust_stock", product["id"],
+            {"size": key, "new_quantity": qty, "reason": reason},
+        )
+        conn.commit()
+
+    return {
+        "preview": True,
+        "sku": product["sku"],
+        "product_name": product["name"],
+        "category": product["category"],
+        "size": key,
+        "current_quantity": current,
+        "new_quantity": qty,
+        "change": qty - current,
+        "current_stock_by_size": stock,
+        "product_active": product["active"],
+        "reason": reason,
+        "will_change": [f"{product['name']} size {key}: {current} -> {qty} units"],
+        "confirmation_expires_in_minutes": ADMIN_TOKEN_TTL_MINUTES,
+        "next_step": (
+            "Read back the product name, SKU, size, and the before/after quantity, and ask the "
+            "staff member to confirm. Only then call admin_adjust_stock."
+        ),
+    }
+
+
+def admin_adjust_stock(
+    actor_customer_id: str, sku: str, new_quantity: int, reason: str,
+    conversation_id: str, size: str | None = None,
+) -> dict:
+    """Set the on-hand quantity for one product/size. Requires a matching
+    admin_preview_stock_adjustment in this conversation."""
+    try:
+        reason = _clean_reason(reason)
+    except ValueError as e:
+        return {"applied": False, "reason": "reason_required", "message": str(e)}
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        product = _load_product_for_write(cur, sku)
+        if not product:
+            return {"applied": False, "reason": "not_found", "message": f"No product with SKU '{sku}'."}
+        stock = dict(product["stock_by_size"] or {})
+        key, err = _resolve_size(stock, size)
+        if err:
+            return {"applied": False, **err}
+        qty, err = _validate_quantity(new_quantity)
+        if err:
+            return {"applied": False, **err}
+
+        token_id, terr = _claim_token(
+            cur, conversation_id, "admin_adjust_stock", product["id"],
+            {"size": key, "new_quantity": qty, "reason": reason},
+        )
+        if terr:
+            return terr
+
+        before = dict(stock)
+        cur.execute(
+            """
+            UPDATE products
+            SET stock_by_size = jsonb_set(stock_by_size, ARRAY[%s], to_jsonb(%s::int)),
+                updated_at = now()
+            WHERE id = %s
+            RETURNING stock_by_size
+            """,
+            (key, qty, product["id"]),
+        )
+        after = dict(cur.fetchone()["stock_by_size"])
+        cur.execute("UPDATE confirmation_tokens SET used_at = now() WHERE id = %s", (token_id,))
+        _log_admin_action(
+            cur, actor_customer_id, conversation_id, "admin_adjust_stock", "products", product["id"],
+            before, after, reason,
+        )
+        conn.commit()
+
+    return {
+        "applied": True,
+        "sku": product["sku"],
+        "product_name": product["name"],
+        "size": key,
+        "previous_quantity": int(before.get(key, 0)),
+        "new_quantity": qty,
+        "stock_by_size": after,
+        "reason": reason,
+        "message": f"{product['name']} size {key} set to {qty} units.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Write 3 — goodwill coupon
+# ---------------------------------------------------------------------------
+
+
+def _validate_goodwill_amount(amount_rupees) -> tuple[int | None, dict | None]:
+    """The one place in this codebase where a model-supplied number becomes
+    money. Everywhere else an amount is derived server-side from an order total
+    or a policy row; here a staff member genuinely chooses a figure, so it is
+    validated hard and capped rather than trusted.
+
+    Rupees, not paise: asking the model for a *_cents value is asking it to do
+    the exact ×100 arithmetic the _display convention exists because it gets
+    wrong.
+    """
+    try:
+        rupees = float(amount_rupees)
+    except (TypeError, ValueError):
+        return None, {"error": "bad_amount", "message": f"amount_rupees must be a number, got '{amount_rupees}'."}
+    if rupees != int(rupees):
+        return None, {
+            "error": "bad_amount",
+            "message": f"amount_rupees must be a whole number of rupees (no paise), got {amount_rupees}.",
+        }
+    cents = int(rupees) * 100
+    if cents <= 0:
+        return None, {"error": "bad_amount", "message": "amount_rupees must be greater than zero."}
+    if cents > ADMIN_COUPON_MAX_CENTS:
+        return None, {
+            "error": "exceeds_limit",
+            "message": (
+                f"{format_inr(cents)} exceeds the {format_inr(ADMIN_COUPON_MAX_CENTS)} cap on a "
+                "chat-issued goodwill coupon. No coupon was created. Anything larger has to be "
+                "authorised outside this assistant."
+            ),
+            "cap_display": format_inr(ADMIN_COUPON_MAX_CENTS),
+        }
+    return cents, None
+
+
+def _load_customer_for_write(cur, customer_email: str):
+    cur.execute(
+        "SELECT id, name, email, role FROM customers WHERE lower(email) = lower(%s)",
+        ((customer_email or "").strip(),),
+    )
+    return cur.fetchone()
+
+
+def admin_preview_goodwill_coupon(
+    actor_customer_id: str, customer_email: str, amount_rupees: int, reason: str,
+    conversation_id: str,
+) -> dict:
+    """Show the goodwill coupon that would be issued, and mint its confirmation.
+    Creates nothing — no coupon row exists until admin_issue_goodwill_coupon."""
+    try:
+        reason = _clean_reason(reason)
+    except ValueError as e:
+        return {"error": "reason_required", "message": str(e)}
+
+    cents, err = _validate_goodwill_amount(amount_rupees)
+    if err:
+        return err
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        customer = _load_customer_for_write(cur, customer_email)
+        if not customer:
+            return {
+                "error": "not_found",
+                "message": (
+                    f"No customer with email '{customer_email}'. Use admin_find_customer to get "
+                    "their exact address — a goodwill coupon must go to a real, confirmed person."
+                ),
+            }
+        policy = get_policy(cur)
+        expiry_days = policy["expiry_days"]
+        _mint_token(
+            cur, conversation_id, "admin_issue_goodwill_coupon", customer["id"],
+            {"amount_cents": cents, "reason": reason},
+        )
+        conn.commit()
+
+    return {
+        "preview": True,
+        "customer_name": customer["name"],
+        "customer_email": customer["email"],
+        "currency": "INR",
+        "amount_display": format_inr(cents),
+        "expiry_days": expiry_days,
+        "reason": reason,
+        "will_change": [
+            f"A new store-credit coupon worth {format_inr(cents)} for {customer['name']}",
+            f"Valid for {expiry_days} days, usable on any future purchase",
+        ],
+        "note": (
+            "A goodwill coupon is store credit, not a refund — it is not tied to any order and "
+            "cannot be exchanged for cash."
+        ),
+        "confirmation_expires_in_minutes": ADMIN_TOKEN_TTL_MINUTES,
+        "next_step": (
+            "Read back the customer's name and the amount, and ask the staff member to confirm. "
+            "Only then call admin_issue_goodwill_coupon."
+        ),
+    }
+
+
+def admin_issue_goodwill_coupon(
+    actor_customer_id: str, customer_email: str, amount_rupees: int, reason: str,
+    conversation_id: str,
+) -> dict:
+    """Issue a sourceless store-credit coupon to any customer. Requires a
+    matching admin_preview_goodwill_coupon in this conversation."""
+    try:
+        reason = _clean_reason(reason)
+    except ValueError as e:
+        return {"applied": False, "reason": "reason_required", "message": str(e)}
+
+    cents, err = _validate_goodwill_amount(amount_rupees)
+    if err:
+        # Note the ordering: the cap is checked BEFORE the token is claimed, so a
+        # rejected amount neither creates a coupon nor consumes a confirmation.
+        return {"applied": False, **err}
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        customer = _load_customer_for_write(cur, customer_email)
+        if not customer:
+            return {"applied": False, "reason": "not_found", "message": f"No customer with email '{customer_email}'."}
+
+        token_id, terr = _claim_token(
+            cur, conversation_id, "admin_issue_goodwill_coupon", customer["id"],
+            {"amount_cents": cents, "reason": reason},
+        )
+        if terr:
+            return terr
+
+        policy = get_policy(cur)
+        # bonus_percent=0: the cancellation/return bonus buys retention against a
+        # refund the customer was owed anyway. Goodwill is already a gift; there
+        # is nothing to top up, and applying a bonus here would silently issue
+        # more than the amount the staff member confirmed.
+        coupon = mint_coupon(
+            cur, customer["id"], "goodwill", cents, 0, policy["expiry_days"],
+        )
+        cur.execute("UPDATE confirmation_tokens SET used_at = now() WHERE id = %s", (token_id,))
+        _log_admin_action(
+            cur, actor_customer_id, conversation_id, "admin_issue_goodwill_coupon",
+            "coupons", coupon["id"], None,
+            {
+                "code": coupon["code"],
+                "customer_email": customer["email"],
+                "total_cents": coupon["total_cents"],
+            },
+            reason,
+        )
+        conn.commit()
+
+    return {
+        "applied": True,
+        "coupon_code": coupon["code"],
+        "customer_name": customer["name"],
+        "customer_email": customer["email"],
+        "currency": "INR",
+        "total_display": format_inr(coupon["total_cents"]),
+        "expires_at": coupon["expires_at"],
+        "reason": reason,
+        "message": (
+            f"Issued {format_inr(coupon['total_cents'])} of store credit to {customer['name']} "
+            f"(code {coupon['code']}). Give them the code — it's already active."
+        ),
     }

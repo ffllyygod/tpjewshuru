@@ -128,6 +128,14 @@ _TOOL_IMPL = {
     "admin_find_customer": admin_tools.admin_find_customer,
     "admin_customer_profile": admin_tools.admin_customer_profile,
     "admin_bot_stats": admin_tools.admin_bot_stats,
+    # Staff writes — each preview mints a confirmation the matching apply
+    # consumes; see the WRITES section of src/tools/admin_tools.py.
+    "admin_preview_order_cancellation": admin_tools.admin_preview_order_cancellation,
+    "admin_cancel_order": admin_tools.admin_cancel_order,
+    "admin_preview_stock_adjustment": admin_tools.admin_preview_stock_adjustment,
+    "admin_adjust_stock": admin_tools.admin_adjust_stock,
+    "admin_preview_goodwill_coupon": admin_tools.admin_preview_goodwill_coupon,
+    "admin_issue_goodwill_coupon": admin_tools.admin_issue_goodwill_coupon,
 }
 _NEEDS_CUSTOMER_ID = {
     "list_customer_orders", "get_order_status", "check_cancellation_eligibility", "cancel_order",
@@ -135,7 +143,16 @@ _NEEDS_CUSTOMER_ID = {
     "redeem_coupon", "place_order",
     "start_gold_sip", "pay_sip_installment", "get_my_gold_sips", "cancel_gold_sip", "redeem_gold_sip",
 }
-_NEEDS_CONVERSATION_ID = {"check_cancellation_eligibility", "cancel_order", "issue_coupon"}
+_NEEDS_CONVERSATION_ID = {
+    "check_cancellation_eligibility", "cancel_order", "issue_coupon",
+    # Every admin write, both halves: the preview mints a token scoped to this
+    # conversation and the apply looks it up by the same scope. Injected here,
+    # never model-supplied — a model that could pass a conversation_id could
+    # redeem a confirmation minted in someone else's session.
+    "admin_preview_order_cancellation", "admin_cancel_order",
+    "admin_preview_stock_adjustment", "admin_adjust_stock",
+    "admin_preview_goodwill_coupon", "admin_issue_goodwill_coupon",
+}
 
 # Staff-only tools. Populated as admin tools land; the gate below is already
 # live so the mechanism is proven before it has anything to guard.

@@ -6,6 +6,67 @@ debugging this at 2am, and interview-me explaining design choices out loud.
 
 ---
 
+## 2026-08-15 (admin writes) — Operational writes, and why the token grew a `params` column
+
+The admin persona could read the whole business but change none of it. This
+adds three preview/apply pairs — cancel any customer's order, set stock for one
+product/size, issue a goodwill coupon — reusing the customer-cancellation
+confirmation pattern rather than inventing a second one.
+
+**The coupon constraint was a genuine blocker, and the obvious fix was wrong.**
+`coupons` had `CHECK (num_nonnulls(source_order_id, source_subscription_id) = 1)`:
+every coupon had to trace back to a cancelled order or an exited Gold SIP, so a
+goodwill coupon — compensation for a late delivery, with no order behind it —
+was structurally impossible to insert. The tempting fix is `<= 1`. That's too
+loose: it would equally permit a *cancellation* coupon with no source order,
+quietly detaching the audit trail the settlement flow depends on. What landed
+instead is a `CASE` constraint tying the sourceless case to
+`source_type = 'goodwill'` specifically — that type has no source column, but it
+is the only type that must have an `admin_action_log` row naming who issued it.
+The audit trail moves rather than disappearing.
+
+**The real design problem was that a token scoped to the target wasn't enough.**
+Customer cancellation scopes its confirmation to
+`(conversation_id, action, target_id)`, which is airtight *there* because
+"cancel order X" is fully described by X. It does not generalise. "Give this
+customer ₹500" and "give this customer ₹5,00,000" share a conversation, an
+action, and a target id — so a token minted by previewing the small one would
+have authorised the large one, and the preview the human actually approved would
+have had nothing to do with what executed. So `confirmation_tokens` gained a
+`params JSONB` column: the apply re-derives its effect from the previewed params
+and returns `params_changed` if its arguments have drifted. Two parametrized
+tests pin the decimal-slip case, because that — not a forged token — is the
+realistic failure.
+
+Ordering that took a moment to get right: **value caps are checked before the
+token is claimed.** Reversed, an over-cap typo would consume the confirmation
+and force the staff member through the whole flow again to fix their own
+typo. Relatedly, `_claim_token` deliberately does *not* burn the token; the
+caller burns it inside the same transaction as the write, so a call that fails
+re-validation afterwards leaves the confirmation intact. There's a test for
+that, and one for the inverse — the apply re-checks status from scratch, so an
+order delivered between preview and apply is refused despite a valid token.
+
+`amount_rupees` is the one place in this codebase where a model-supplied number
+becomes money. It's rupees, not paise, deliberately: asking for a `*_cents`
+value is asking the model to do the ×100 arithmetic that the whole `_display`
+convention exists because it gets wrong. It's validated hard (whole numbers,
+positive, capped at ₹50,000) and the cap refuses outright rather than trimming —
+a silently reduced coupon would be worse than an error.
+
+Goodwill coupons get **no bonus percentage**. The cancellation/return bonus buys
+retention against a refund the customer was owed anyway; goodwill is already the
+gift, so a bonus would issue more than the staff member confirmed.
+
+43 new tests, 170 total. Most of them assert a write did *not* happen.
+
+**Known limitation, same as the customer path:** the token proves the preview
+ran in this conversation, **not** that a human said yes in between. That step is
+prompt-enforced only. What the token does buy is that a single confused turn
+cannot both discover a target and mutate it.
+
+---
+
 ## 2026-08-15 (admin persona) — A second audience, and what live testing found
 
 Opened the chatbot to staff: sales/inventory/customer/order questions across
