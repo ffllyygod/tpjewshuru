@@ -241,7 +241,13 @@ def _dormant_vip(cur, limit: int) -> list[dict]:
         WHERE {_eligible_customer_sql()}
         GROUP BY cu.id, cu.name
         HAVING SUM(o.total_amount_cents - o.discount_cents) >= %s
-           AND MAX(o.placed_at) < now() - interval '%s days'
+           -- make_interval, NOT a placeholder inside an interval string
+           -- literal. psycopg counts placeholders lexically — quoting and
+           -- comments don't hide one — so writing the day count that way
+           -- substituted it INSIDE the quotes and produced a cutoff of two
+           -- days rather than six months. Every recent customer then matched
+           -- "dormant", with no error raised. Pinned by a test.
+           AND MAX(o.placed_at) < now() - make_interval(days => %s)
         ORDER BY lifetime DESC
         LIMIT %s
         """,

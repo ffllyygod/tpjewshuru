@@ -108,6 +108,38 @@ def test_opt_out_records_when(customer):
     assert at is not None
 
 
+def test_dormant_means_dormant(customer):
+    """Regression: the dormancy cutoff was written as `interval '%s days'` with
+    the day count passed as a parameter. A placeholder inside a string literal
+    doesn't bind the way it reads — with 180 passed in, the cutoff came out two
+    days ago, so customers who had ordered last week were being flagged as
+    dormant VIPs. No error, just a wrong answer, which is the failure mode this
+    whole codebase keeps running into.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id FROM products WHERE active LIMIT 1")
+        product_id = cur.fetchone()[0]
+        # A big order placed yesterday: VIP-sized, but the opposite of dormant.
+        cur.execute(
+            """
+            INSERT INTO orders (order_number, customer_id, status, placed_at, total_amount_cents)
+            VALUES (%s, %s, 'DELIVERED', now() - interval '1 day', %s) RETURNING id
+            """,
+            (f"TPJ-V{uuid.uuid4().hex[:6].upper()}", customer["id"],
+             outreach_tools.VIP_LIFETIME_CENTS * 2),
+        )
+        order_id = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO order_items (order_id, product_id, quantity, unit_price_cents) VALUES (%s, %s, 1, %s)",
+            (order_id, product_id, outreach_tools.VIP_LIFETIME_CENTS * 2),
+        )
+        conn.commit()
+
+    dormant = [c for c in outreach_tools.detect_signals(("dormant_vip",), limit=50)
+               if c["customer_id"] == customer["id"]]
+    assert dormant == [], "a customer who ordered yesterday is not dormant"
+
+
 def test_staff_accounts_are_never_marketed_to(actor):
     """Admins live in `customers`, so without the role filter every staff
     account would be a marketing target."""
