@@ -124,12 +124,22 @@ real inventory. The agent loop is not trusted to gate this alone:
 - `confirmation_tokens` — id, conversation_id, action, target_id, token, expires_at, used_at
 - `coupon_policy` — team-editable incentive settings (cancellation/return bonus %, expiry days);
   no code deploy needed to retune the coupon-vs-cash-refund incentive
-- `coupons` — id, code, customer_id, source_type (cancellation|return), source_order_id
-  (UNIQUE — one coupon per order, DB-enforced), amount_cents, bonus_percent_applied (snapshot
-  at issuance), total_cents, remaining_cents (atomically decremented — supports partial/
-  multi-order redemption), status, issued_at, expires_at
-- `orders` also has `coupon_id` + `discount_cents` — set when an order was placed using
-  coupon balance (see `src/tools/coupon_tools.py`, `src/tools/purchase_tools.py`)
+- `coupons` — id, code, customer_id, source_type (cancellation|return|gold_sip_cancellation),
+  source_order_id / source_subscription_id (polymorphic — exactly one set, each with its own
+  partial unique index for one-coupon-per-source idempotency), amount_cents,
+  bonus_percent_applied (snapshot at issuance), total_cents, remaining_cents (atomically
+  decremented — supports partial/multi-order redemption), status, issued_at, expires_at
+- `gold_sip_plans` — team-editable tiers: name, tenure_months, bonus_percent,
+  early_exit_penalty_percent, active
+- `gold_sip_subscriptions` — customer_id, plan_id + snapshotted terms, monthly_amount_cents,
+  installments_paid, total_paid_cents, redeemable_cents (set at maturity), remaining_cents
+  (atomically decremented), status, exit_coupon_id (set on early cancellation)
+- `gold_sip_installments` — ledger, UNIQUE(subscription_id, installment_number) for
+  idempotency
+- `orders` also has `coupon_id` / `gold_sip_subscription_id` + `discount_cents` — set when an
+  order was placed using coupon or Gold SIP balance (at most one discount source per order,
+  DB-enforced); see `src/tools/coupon_tools.py`, `src/tools/gold_sip_tools.py`,
+  `src/tools/purchase_tools.py`
 
 ## Stack
 

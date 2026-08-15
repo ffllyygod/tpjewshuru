@@ -105,12 +105,17 @@ TOOLS = [
     },
     {
         "name": "redeem_coupon",
-        "description": "Apply a coupon's balance toward an order's total. Confirm the resulting total with the customer before finalizing anything else.",
+        "description": (
+            "Apply a coupon's balance toward an order's total. Confirm the resulting total with the "
+            "customer before finalizing anything else. Prefer passing coupon_code to place_order "
+            "directly instead of calling this separately after — only use this for an order that "
+            "already exists without a discount applied."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "code": {"type": "string", "description": "The coupon code, e.g. TPJ-CPN-XXXXXXXXXXXX"},
-                "order_number": {"type": "string"},
+                "order_number": {"type": "string", "description": "The order's order_number, e.g. TPJ-793859 — this is NOT a product SKU (e.g. TPJ-RIN-1010 is a SKU, not an order_number)."},
             },
             "required": ["code", "order_number"],
         },
@@ -119,7 +124,8 @@ TOOLS = [
         "name": "place_order",
         "description": (
             "Place a new order for a product. Confirm the product, size (if applicable), and quantity back "
-            "to the customer before calling this. Optionally applies a coupon code at the same time."
+            "to the customer before calling this. Optionally applies a coupon code OR a matured Gold SIP "
+            "code at the same time (not both — an order can only carry one discount source)."
         ),
         "input_schema": {
             "type": "object",
@@ -128,6 +134,7 @@ TOOLS = [
                 "quantity": {"type": "integer", "default": 1},
                 "size": {"type": "string", "description": "Required for sized items (e.g. rings)."},
                 "coupon_code": {"type": "string", "description": "Optional — apply an existing coupon to this order."},
+                "gold_sip_code": {"type": "string", "description": "Optional — apply a matured Gold SIP subscription's balance to this order."},
             },
             "required": ["sku"],
         },
@@ -163,6 +170,67 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {},
+        },
+    },
+    {
+        "name": "list_gold_sip_plans",
+        "description": "List available Gold SIP (Systematic Investment Plan) tiers — tenure, maturity bonus %, early-exit penalty %. Use when the customer asks about gold savings/investment schemes.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "start_gold_sip",
+        "description": "Start a new Gold SIP subscription. Confirm the plan name, tenure, and monthly amount back to the customer before calling — this commits them to a recurring plan.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "plan_name": {"type": "string", "description": "Must exactly match a 'name' value returned by list_gold_sip_plans, e.g. 'Classic 6-Month' — copy it verbatim, don't paraphrase or reformat it."},
+                "monthly_amount": {"type": "number", "description": "Monthly installment amount in rupees."},
+            },
+            "required": ["plan_name", "monthly_amount"],
+        },
+    },
+    {
+        "name": "pay_sip_installment",
+        "description": "Record the next monthly installment payment for a Gold SIP subscription (demo: callable on-demand, no calendar-month wait). Auto-matures the subscription if this completes the tenure.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"subscription_code": {"type": "string", "description": "e.g. TPJ-SIP-XXXXXXXXXXXX"}},
+            "required": ["subscription_code"],
+        },
+    },
+    {
+        "name": "get_my_gold_sips",
+        "description": "List the current customer's Gold SIP subscriptions — progress, status, redeemable/remaining balance.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "cancel_gold_sip",
+        "description": (
+            "Exit a Gold SIP subscription early. Forfeits the maturity bonus and a penalty %; the rest is "
+            "issued as a coupon (never cash). MUST warn the customer clearly about the forfeited bonus and "
+            "get explicit confirmation before calling this."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"subscription_code": {"type": "string"}},
+            "required": ["subscription_code"],
+        },
+    },
+    {
+        "name": "redeem_gold_sip",
+        "description": (
+            "Apply a MATURED Gold SIP subscription's balance toward an order's total. Confirm the "
+            "resulting total with the customer before finalizing. Prefer passing gold_sip_code to "
+            "place_order directly instead of calling this separately after — only use this for an "
+            "order that already exists without a discount applied."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "subscription_code": {"type": "string"},
+                "order_number": {"type": "string", "description": "The order's order_number, e.g. TPJ-793859 — this is NOT a product SKU (e.g. TPJ-RIN-1010 is a SKU, not an order_number)."},
+            },
+            "required": ["subscription_code", "order_number"],
         },
     },
     {

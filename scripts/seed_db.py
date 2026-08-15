@@ -346,6 +346,35 @@ def seed_coupon_policy(conn: psycopg.Connection) -> None:
     print("Seeded default coupon policy (10% cancellation / 15% return bonus, 180-day expiry).")
 
 
+GOLD_SIP_PLANS = [
+    # (name, tenure_months, bonus_percent, early_exit_penalty_percent)
+    # `name` is the ONLY identifier — deliberately already human-readable
+    # (not a separate slug + display-label pair) so there's no ambiguity
+    # between what the agent shows the customer and what it passes back to
+    # start_gold_sip. A slug/display-name split caused the model to invent
+    # its own display string and then pass that (not the real key) as the
+    # tool argument — see JOURNAL.md.
+    ("Classic 6-Month", 6, 5, 5),
+    ("Standard 11-Month", 11, 9, 8),
+    ("Premium 12-Month", 12, 10, 10),
+]
+
+
+def seed_gold_sip_plans(conn: psycopg.Connection) -> None:
+    with conn.cursor() as cur:
+        for name, tenure, bonus, penalty in GOLD_SIP_PLANS:
+            cur.execute(
+                """
+                INSERT INTO gold_sip_plans (name, tenure_months, bonus_percent, early_exit_penalty_percent)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (name) DO NOTHING
+                """,
+                (name, tenure, bonus, penalty),
+            )
+    conn.commit()
+    print(f"Seeded {len(GOLD_SIP_PLANS)} Gold SIP plan tiers.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--reset", action="store_true", help="drop and recreate the schema first")
@@ -364,6 +393,7 @@ def main() -> None:
         seed_orders(conn, customers, products)
         seed_knowledge_docs(conn)
         seed_coupon_policy(conn)
+        seed_gold_sip_plans(conn)
 
     print("\nDone.")
 

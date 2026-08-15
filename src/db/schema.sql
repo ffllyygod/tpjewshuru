@@ -55,11 +55,12 @@ CREATE TABLE orders (
   -- Set when this order was placed using coupon balance (src/tools/purchase_tools.py).
   -- discount_cents is tracked separately from total_amount_cents so the "real" catalog
   -- total stays visible/auditable alongside what the coupon actually covered.
-  -- FK to coupons(id) added below via ALTER TABLE, once that table exists —
-  -- coupons.source_order_id references orders(id), so the two tables are mutually
-  -- referential and one FK has to be added after both CREATE TABLEs.
-  coupon_id           UUID,
-  discount_cents      BIGINT NOT NULL DEFAULT 0
+  -- FKs to coupons(id) / gold_sip_subscriptions(id) added below via ALTER TABLE,
+  -- once those tables exist — they in turn reference orders(id), so these are
+  -- mutually referential and the FKs have to be added after all CREATE TABLEs.
+  coupon_id                 UUID,
+  gold_sip_subscription_id  UUID,
+  discount_cents            BIGINT NOT NULL DEFAULT 0
 );
 
 CREATE INDEX orders_customer_id_idx ON orders(customer_id);
@@ -172,26 +173,108 @@ CREATE TABLE coupon_policy (
   updated_at                  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- source_order_id / source_subscription_id are mutually exclusive — a coupon
+-- comes from EITHER a cancelled/returned order OR an early-exited Gold SIP
+-- (src/tools/gold_sip_tools.py), never both. source_subscription_id's FK to
+-- gold_sip_subscriptions(id) is added later via ALTER TABLE, since that table
+-- doesn't exist yet at this point in the file (coupons and gold_sip_subscriptions
+-- are mutually referential — coupons.source_subscription_id / gold_sip_subscriptions.exit_coupon_id).
 CREATE TABLE coupons (
-  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  code                  TEXT NOT NULL UNIQUE,   -- e.g. "TPJ-CPN-xxxxxxxxxxxx"
-  customer_id           UUID NOT NULL REFERENCES customers(id),
-  source_type           TEXT NOT NULL,          -- 'cancellation' | 'return'
-  -- One coupon per cancelled/returned order — enforced at the DB level, not
-  -- just in application logic, so a bug or a retried tool call can't double-issue.
-  source_order_id       UUID NOT NULL UNIQUE REFERENCES orders(id),
-  amount_cents          BIGINT NOT NULL,        -- original order value the coupon is based on
-  bonus_percent_applied NUMERIC NOT NULL,        -- snapshot of policy at issuance
-  total_cents           BIGINT NOT NULL,        -- amount_cents * (1 + bonus_percent_applied/100)
-  remaining_cents       BIGINT NOT NULL,        -- decremented atomically as it's spent; starts == total_cents
-  status                TEXT NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE | REDEEMED | EXPIRED | CANCELLED
-  issued_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
-  expires_at            TIMESTAMPTZ NOT NULL,
-  CHECK (remaining_cents >= 0 AND remaining_cents <= total_cents)
+  id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code                   TEXT NOT NULL UNIQUE,   -- e.g. "TPJ-CPN-xxxxxxxxxxxx"
+  customer_id            UUID NOT NULL REFERENCES customers(id),
+  source_type            TEXT NOT NULL,          -- 'cancellation' | 'return' | 'gold_sip_cancellation'
+  source_order_id        UUID REFERENCES orders(id),
+  source_subscription_id UUID,
+  amount_cents           BIGINT NOT NULL,        -- original order/SIP value the coupon is based on
+  bonus_percent_applied  NUMERIC NOT NULL,        -- snapshot of policy at issuance (0 for SIP early-exit)
+  total_cents            BIGINT NOT NULL,        -- amount_cents * (1 + bonus_percent_applied/100)
+  remaining_cents        BIGINT NOT NULL,        -- decremented atomically as it's spent; starts == total_cents
+  status                 TEXT NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE | REDEEMED | EXPIRED | CANCELLED
+  issued_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at             TIMESTAMPTZ NOT NULL,
+  CHECK (remaining_cents >= 0 AND remaining_cents <= total_cents),
+  CHECK (num_nonnulls(source_order_id, source_subscription_id) = 1)
 );
+
+-- One coupon per source (order OR subscription) — enforced at the DB level via
+-- partial unique indexes (can't be a plain column UNIQUE since the column is
+-- nullable and either one might be the null side), not just application logic,
+-- so a bug or a retried tool call can't double-issue from the same source.
+CREATE UNIQUE INDEX coupons_source_order_id_uidx ON coupons(source_order_id) WHERE source_order_id IS NOT NULL;
+CREATE UNIQUE INDEX coupons_source_subscription_id_uidx ON coupons(source_subscription_id) WHERE source_subscription_id IS NOT NULL;
 
 CREATE INDEX coupons_customer_id_idx ON coupons(customer_id);
 CREATE INDEX coupons_code_idx ON coupons(code);
 
 ALTER TABLE orders
   ADD CONSTRAINT orders_coupon_id_fkey FOREIGN KEY (coupon_id) REFERENCES coupons(id);
+
+-- ============================================================
+-- Gold SIP (Systematic Investment Plan) schemes — see src/tools/gold_sip_tools.py
+-- and JOURNAL.md for the business rationale and security guardrails.
+-- ============================================================
+
+-- Team-editable plan tiers. Multiple named rows (unlike coupon_policy's single
+-- row) since a store typically offers a few tenure/bonus combinations.
+CREATE TABLE gold_sip_plans (
+  id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name                        TEXT NOT NULL UNIQUE,
+  tenure_months               INT NOT NULL,
+  bonus_percent               NUMERIC NOT NULL,
+  early_exit_penalty_percent  NUMERIC NOT NULL,
+  active                      BOOLEAN NOT NULL DEFAULT true,
+  created_at                  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE gold_sip_subscriptions (
+  id                                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code                                   TEXT NOT NULL UNIQUE,  -- e.g. "TPJ-SIP-xxxxxxxxxxxx", human-referenceable
+  customer_id                           UUID NOT NULL REFERENCES customers(id),
+  plan_id                               UUID NOT NULL REFERENCES gold_sip_plans(id),
+  -- Snapshotted at start time so a later edit to gold_sip_plans doesn't
+  -- retroactively change an in-progress subscription's terms.
+  tenure_months_snapshot                INT NOT NULL,
+  bonus_percent_snapshot                NUMERIC NOT NULL,
+  early_exit_penalty_percent_snapshot   NUMERIC NOT NULL,
+  monthly_amount_cents                  BIGINT NOT NULL,
+  installments_paid                     INT NOT NULL DEFAULT 0,
+  total_paid_cents                      BIGINT NOT NULL DEFAULT 0,
+  redeemable_cents                      BIGINT,          -- set at maturity
+  remaining_cents                       BIGINT,          -- decremented atomically as it's spent
+  status                                TEXT NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE | MATURED | REDEEMED | CANCELLED
+  started_at                            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  matured_at                            TIMESTAMPTZ,
+  cancelled_at                          TIMESTAMPTZ,
+  exit_coupon_id                        UUID REFERENCES coupons(id),
+  CHECK (remaining_cents IS NULL OR (remaining_cents >= 0 AND remaining_cents <= redeemable_cents))
+);
+
+CREATE INDEX gold_sip_subscriptions_customer_id_idx ON gold_sip_subscriptions(customer_id);
+
+ALTER TABLE coupons
+  ADD CONSTRAINT coupons_source_subscription_id_fkey
+  FOREIGN KEY (source_subscription_id) REFERENCES gold_sip_subscriptions(id);
+
+ALTER TABLE orders
+  ADD CONSTRAINT orders_gold_sip_subscription_id_fkey
+  FOREIGN KEY (gold_sip_subscription_id) REFERENCES gold_sip_subscriptions(id);
+
+-- Deliberately no stacking a coupon AND a Gold SIP redemption on the same
+-- order in this scope — enforced at the DB level, not just application logic.
+ALTER TABLE orders
+  ADD CONSTRAINT orders_single_discount_source_chk
+  CHECK (num_nonnulls(coupon_id, gold_sip_subscription_id) <= 1);
+
+-- Ledger of individual installment payments. UNIQUE(subscription_id,
+-- installment_number) is the DB-enforced idempotency guard against double-
+-- counting the same installment under a concurrent-call race — same pattern
+-- as coupons' one-coupon-per-source partial unique indexes above.
+CREATE TABLE gold_sip_installments (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  subscription_id     UUID NOT NULL REFERENCES gold_sip_subscriptions(id) ON DELETE CASCADE,
+  installment_number  INT NOT NULL,
+  amount_cents        BIGINT NOT NULL,
+  paid_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (subscription_id, installment_number)
+);

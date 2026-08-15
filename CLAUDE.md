@@ -26,15 +26,24 @@ cp .env.example .env                        # fill in DATABASE_URL (default is f
 cd web && npm install && npm run dev        # http://localhost:3000
 ```
 
-Model backend is OpenRouter (hosting DeepSeek, OpenAI-compatible API) — no
-local model/GPU needed, ~5-8s/turn. Any OpenAI-compatible provider works via
-`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL` — this orchestrator has run against
-Anthropic, local Ollama, NVIDIA NIM, and OpenRouter without the tool-loop
-logic ever changing, only `_call_model()`. See `JOURNAL.md` 2026-08-15
-(night) entries for the full story, including a real network-latency bug
-(NIM stalled for minutes on this network for reasons unrelated to NIM
-itself) and the OpenAI tool-calling protocol gotchas (tool-call-id linking,
-string-encoded arguments) if swapping backends again.
+Model backend is OpenRouter hosting `openai/gpt-4o-mini` (OpenAI-compatible
+API) — no local model/GPU needed, ~5-8s/turn. Any OpenAI-compatible provider
+works via `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL` — this orchestrator has
+run against Anthropic, local Ollama, NVIDIA NIM, and two different
+OpenRouter-hosted models without the tool-loop logic ever changing, only
+`_call_model()`. **Model choice matters more than you'd think for a
+money-adjacent agent**: DeepSeek (tried first, cheaper) confabulated a
+payment success without ever calling the tool on some repeated requests —
+gpt-4o-mini reliably calls a tool for every state-changing request in the
+same tests, at the cost of needing a firmer "wait for explicit confirmation"
+instruction (it was initially too eager). See `JOURNAL.md`'s "gold-sip-schemes"
+entry for the full comparison and two other real bugs found via live testing
+(a plan-name identifier-ambiguity bug, and a serious one — the model can
+select a wrong-but-valid product SKU while still describing the right
+product in prose; mitigated, not proven eliminated). Also see the earlier
+2026-08-15 (night) entries for the NIM network-latency story and OpenAI
+tool-calling protocol gotchas (tool-call-id linking, string-encoded
+arguments) if swapping backends again.
 
 Run tests: `.venv/Scripts/python -m pytest tests/ -v` — hits the live DB
 directly, no mocking. Re-run `seed_db.py --reset` after, since the

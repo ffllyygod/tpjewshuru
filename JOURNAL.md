@@ -6,6 +6,108 @@ debugging this at 2am, and interview-me explaining design choices out loud.
 
 ---
 
+## 2026-08-15 (branch: gold-sip-schemes) — Gold SIP schemes, and three real LLM-reliability bugs
+
+**Branched off `coupon-redeem-system`, not `main`** — the plan initially said "off main"
+but Gold SIP's design deliberately reuses `coupon_tools.mint_coupon` (early-exit payout)
+and `purchase_tools.place_order` (redemption demo), neither of which exist on `main` yet.
+Caught this immediately after branching (checked `src/tools/` and `coupon_tools.py` was
+missing) — recreated the branch off the right base before writing any code.
+
+**Business case, schema, tools:** as planned — team-editable `gold_sip_plans` (multiple
+tiers, unlike `coupon_policy`'s single row), `gold_sip_subscriptions` with snapshotted
+terms, `gold_sip_installments` ledger with `UNIQUE(subscription_id, installment_number)`
+idempotency. Extended `coupons` to a polymorphic source (`source_order_id` OR
+`source_subscription_id`, exactly one via `CHECK (num_nonnulls(...) = 1)`, partial unique
+indexes replacing the old plain `UNIQUE` since the column is now nullable). Extended
+`orders` with `gold_sip_subscription_id` + a `CHECK` forbidding stacking a coupon and a
+SIP discount on the same order. All atomic-guarded-UPDATE and ownership-check patterns
+directly reused from the coupon system — `redeem_gold_sip` is structurally identical to
+`redeem_coupon`. 36/36 tests passing (10 new).
+
+**Three real bugs found live, not by the unit tests — this is why live verification
+still matters even with good coverage:**
+
+1. **Plan-name ambiguity.** Seeded plans with a machine slug (`"classic_6"`) separate
+   from what the agent would naturally call it in conversation ("Classic 6-Month Plan").
+   The model displayed the friendly version to the customer, then passed that *same
+   invented string* back as `plan_name` to `start_gold_sip` — which only recognized the
+   slug. Tool correctly rejected it, but the model just re-listed plans instead of
+   recovering. **Fixed at the data layer**: renamed the seeded plans so the `name` column
+   *is* the human-readable string (`"Classic 6-Month"`) — one identifier, not two, so
+   there's nothing for the model to paraphrase into a different value. Same lesson as the
+   earlier currency-symbol bug: fix ambiguity in the data/schema, don't just tell the
+   model to be careful.
+
+2. **Payment confabulation (DeepSeek).** Asked "pay the next installment" twice in a row;
+   the second reply confidently reported success ("Installment 2/6, ₹10,000 paid") with a
+   full plausible-looking status update — but the audit log showed **zero** second
+   `pay_sip_installment` call. It fabricated the outcome from the conversational pattern
+   instead of calling the tool. Added an explicit "CRITICAL: every claimed state change
+   needs a tool call in THIS exact turn" rule to the system prompt — **retested with the
+   identical repro and it still confabulated.** Prompt-only mitigation was insufficient.
+   Swapped the model (`deepseek/deepseek-chat` → `openai/gpt-4o-mini`, both via
+   OpenRouter, zero code changes — this is what the whole backend-agnostic `_call_model()`
+   design has been for) and reran: gpt-4o-mini correctly called the tool on repeated
+   near-identical requests and correctly disambiguated when multiple subscriptions
+   existed instead of guessing. Traded one failure mode for a different one (see #2b),
+   but "never lies about whether money moved" matters more than "never over-eager."
+
+   2b. **gpt-4o-mini's own failure mode**: initially ignored the "wait for explicit
+   confirmation before start_gold_sip" instruction entirely, calling the tool immediately
+   and then again on the customer's "yes" — creating two duplicate subscriptions.
+   Strengthened that specific instruction with the same successful imperative pattern
+   already used for `cancel_order` ("NEVER call X in the same turn as the first request —
+   wait for a SEPARATE confirming message") — retested, fixed cleanly, no duplicate on
+   a repeat run.
+
+   **Residual, not fully solved**: in one 6-installment rapid-fire test even after the
+   swap, gpt-4o-mini only made 4 real tool calls out of 6 requests (2 silently skipped,
+   without the earlier version's confabulated-success text — worth re-checking whether it
+   under-reported or just merged responses). Documenting this honestly rather than
+   claiming full reliability: **tool-calling correctness on every single turn is not
+   guaranteed by any model tested here** — the ledger itself stays correct (idempotent,
+   atomic, DB-enforced) regardless of what the reply text claims, but a customer trusting
+   the chat transcript alone could be misled. `get_my_gold_sips`/`get_my_coupons` exist
+   precisely as the "don't trust the narrative, check the real balance" escape hatch —
+   worth surfacing that more proactively in a real product, e.g. always showing a live
+   balance alongside the chat rather than only on request.
+
+3. **Wrong-product purchase (the serious one).** Confirmed to the customer "Rose Gold
+   Diamond Solitaire Ring, ₹3,25,000," customer said yes — but the `place_order` call
+   that followed used a SKU that was never returned by any tool call in the conversation
+   (looked plausible, wasn't real) and failed; the model then searched again, got real
+   results, but picked a *different, unrelated* SKU (`TPJ-RIN-1010`, a silver/emerald
+   ring, ₹1,22,094.97) for the actual order — while still describing the purchase as the
+   rose gold ring in its reply. This is not a display bug: **a materially different,
+   wrong-priced product was actually purchased** than what the customer confirmed. This
+   is the most serious finding in this branch — it's a real, known-hard problem for
+   agentic commerce generally (a model can select a wrong-but-structurally-valid ID even
+   while describing the right thing in prose), not something a single prompt fix reliably
+   eliminates. Mitigation applied: system prompt now requires the SKU to be copied
+   verbatim from a tool result **in this turn or the previous one** (never recalled from
+   memory), and requires stating the SKU alongside the name when confirming, so a
+   mismatch is at least visible in the transcript. Retested the same scenario — correct
+   product ordered, verified against Postgres (`sku = TPJ-RIN-DEMO1`, matching the
+   confirmed name and price). **Improved, not proven eliminated** — this class of bug
+   needs a structural fix (e.g. a UI that has the customer click/select a specific listed
+   item rather than the model transcribing an ID) to be truly closed, not just a better
+   prompt. Noted as a real limitation of free-text-SKU tool-calling for anything
+   purchase-related, not swept under the rug.
+
+**Also found**: an off-by-10× display error (model said "₹6,30,000" when the DB correctly
+held ₹63,000 in `redeemable_cents`) — a one-off arithmetic slip in paise→rupee conversion,
+not a data bug. Recommended follow-up (not built, given time): have tools return a
+pre-formatted currency string (`"redeemable_formatted": "₹63,000.00"`) alongside raw
+paise, removing the need for any model to do that arithmetic at all — the same principle
+as adding `"currency": "INR"` to tool responses, taken one step further.
+
+Live-verified the full happy path end-to-end after all three fixes: start → confirm →
+pay 6 installments (each producing a real, audited `pay_sip_installment` call) → mature
+at the correct bonus-adjusted amount → purchase a product with the SIP balance applied →
+correct product, correct price, correct discount, correct remaining balance — all checked
+against Postgres directly, not the reply text.
+
 ## 2026-08-15 (branch: coupon-redeem-system, continued) — Switched store currency to INR
 
 Everything (`products.price_cents`, `orders.total_amount_cents`, coupon

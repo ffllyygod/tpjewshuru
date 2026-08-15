@@ -27,9 +27,9 @@ from psycopg.rows import dict_row
 from src.agent.system_prompt import SYSTEM_PROMPT
 from src.agent.tool_schemas import TOOLS
 from src.db.connection import get_conn
-from src.tools import coupon_tools, knowledge_tools, market_tools, order_tools, product_tools, purchase_tools
+from src.tools import coupon_tools, gold_sip_tools, knowledge_tools, market_tools, order_tools, product_tools, purchase_tools
 
-LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek/deepseek-chat")
+LLM_MODEL = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")
 MAX_TOOL_ITERATIONS = 8
 
 _client = OpenAI(
@@ -70,11 +70,18 @@ _TOOL_IMPL = {
     "get_my_coupons": coupon_tools.get_my_coupons,
     "redeem_coupon": coupon_tools.redeem_coupon,
     "place_order": purchase_tools.place_order,
+    "list_gold_sip_plans": gold_sip_tools.list_gold_sip_plans,
+    "start_gold_sip": gold_sip_tools.start_gold_sip,
+    "pay_sip_installment": gold_sip_tools.pay_sip_installment,
+    "get_my_gold_sips": gold_sip_tools.get_my_gold_sips,
+    "cancel_gold_sip": gold_sip_tools.cancel_gold_sip,
+    "redeem_gold_sip": gold_sip_tools.redeem_gold_sip,
 }
 _NEEDS_CUSTOMER_ID = {
     "list_customer_orders", "get_order_status", "check_cancellation_eligibility", "cancel_order",
     "offer_settlement_options", "issue_coupon", "request_cash_refund", "get_my_coupons",
     "redeem_coupon", "place_order",
+    "start_gold_sip", "pay_sip_installment", "get_my_gold_sips", "cancel_gold_sip", "redeem_gold_sip",
 }
 _NEEDS_CONVERSATION_ID = {"check_cancellation_eligibility", "cancel_order", "issue_coupon"}
 

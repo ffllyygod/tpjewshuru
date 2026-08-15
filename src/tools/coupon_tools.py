@@ -51,6 +51,43 @@ def _get_policy(cur) -> dict:
     return policy
 
 
+def mint_coupon(
+    cur,
+    customer_id: str,
+    source_type: str,
+    amount_cents: int,
+    bonus_percent,
+    expiry_days: int,
+    *,
+    source_order_id: str | None = None,
+    source_subscription_id: str | None = None,
+) -> dict:
+    """Insert a new coupon row for either an order or a Gold SIP subscription
+    source (exactly one must be given — matches the `coupons` table's CHECK).
+    Shared by `issue_coupon` (order-based) and
+    `gold_sip_tools.cancel_gold_sip` (subscription-based, no bonus).
+
+    Raises on a source-uniqueness conflict (the partial unique indexes on
+    coupons.source_order_id / source_subscription_id) — callers handle the
+    idempotent "someone already issued one" fallback themselves, since the
+    re-lookup query differs by which source column is in play.
+    """
+    total_cents = round(amount_cents * (1 + float(bonus_percent) / 100))
+    code = f"TPJ-CPN-{secrets.token_urlsafe(9).replace('_', '').replace('-', '').upper()[:12]}"
+    expires_at = datetime.now(timezone.utc) + timedelta(days=expiry_days)
+    cur.execute(
+        """
+        INSERT INTO coupons (code, customer_id, source_type, source_order_id, source_subscription_id,
+                              amount_cents, bonus_percent_applied, total_cents, remaining_cents, expires_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id, code, total_cents, expires_at
+        """,
+        (code, customer_id, source_type, source_order_id, source_subscription_id,
+         amount_cents, bonus_percent, total_cents, total_cents, expires_at),
+    )
+    return cur.fetchone()
+
+
 def offer_settlement_options(customer_id: str, order_number: str) -> dict:
     """Show the cash-refund vs. instant-coupon choice for an already
     cancelled/returned order. Read-only — creates nothing."""
@@ -127,24 +164,15 @@ def issue_coupon(customer_id: str, order_number: str, conversation_id: str) -> d
 
         policy = _get_policy(cur)
         bonus_percent = policy["cancellation_bonus_percent"] if source_type == "cancellation" else policy["return_bonus_percent"]
-        total_cents = round(order["total_amount_cents"] * (1 + float(bonus_percent) / 100))
-        code = f"TPJ-CPN-{secrets.token_urlsafe(9).replace('_', '').replace('-', '').upper()[:12]}"
-        expires_at = datetime.now(timezone.utc) + timedelta(days=policy["expiry_days"])
 
         try:
-            cur.execute(
-                """
-                INSERT INTO coupons (code, customer_id, source_type, source_order_id,
-                                      amount_cents, bonus_percent_applied, total_cents,
-                                      remaining_cents, expires_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (code, customer_id, source_type, order["id"], order["total_amount_cents"],
-                 bonus_percent, total_cents, total_cents, expires_at),
+            new = mint_coupon(
+                cur, customer_id, source_type, order["total_amount_cents"], bonus_percent,
+                policy["expiry_days"], source_order_id=order["id"],
             )
         except Exception:
             # Race: another concurrent call already issued one for this order
-            # (source_order_id UNIQUE). Fall back to returning that one.
+            # (partial unique index on source_order_id). Fall back to that one.
             conn.rollback()
             cur.execute("SELECT code, total_cents, expires_at FROM coupons WHERE source_order_id = %s", (order["id"],))
             existing = cur.fetchone()
@@ -162,11 +190,11 @@ def issue_coupon(customer_id: str, order_number: str, conversation_id: str) -> d
     return {
         "issued": True,
         "already_existed": False,
-        "coupon_code": code,
+        "coupon_code": new["code"],
         "currency": "INR",
-        "total_cents": total_cents,
+        "total_cents": new["total_cents"],
         "bonus_percent": float(bonus_percent),
-        "expires_at": expires_at.isoformat(),
+        "expires_at": new["expires_at"].isoformat(),
     }
 
 
@@ -247,14 +275,14 @@ def redeem_coupon(customer_id: str, code: str, order_number: str) -> dict:
             return {"redeemed": False, "reason": "exhausted", "message": "This coupon has no remaining balance."}
 
         cur.execute(
-            "SELECT id, total_amount_cents, discount_cents, coupon_id FROM orders WHERE order_number = %s AND customer_id = %s",
+            "SELECT id, total_amount_cents, discount_cents, coupon_id, gold_sip_subscription_id FROM orders WHERE order_number = %s AND customer_id = %s",
             (order_number, customer_id),
         )
         order = cur.fetchone()
         if not order:
             return {"redeemed": False, "reason": "order_not_found", "message": f"No order {order_number} found for this customer."}
-        if order["coupon_id"] is not None:
-            return {"redeemed": False, "reason": "order_already_discounted", "message": "This order already has a coupon applied."}
+        if order["coupon_id"] is not None or order["gold_sip_subscription_id"] is not None:
+            return {"redeemed": False, "reason": "order_already_discounted", "message": "This order already has a coupon or Gold SIP redemption applied."}
 
         deduction = min(coupon["remaining_cents"], order["total_amount_cents"])
 

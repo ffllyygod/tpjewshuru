@@ -128,7 +128,7 @@ def test_expired_coupon_rejected():
             INSERT INTO coupons (code, customer_id, source_type, source_order_id,
                                   amount_cents, bonus_percent_applied, total_cents, remaining_cents, expires_at)
             VALUES (%s, %s, 'cancellation', %s, 10000, 10, 11000, 11000, %s)
-            ON CONFLICT (source_order_id) DO NOTHING
+            ON CONFLICT (source_order_id) WHERE source_order_id IS NOT NULL DO NOTHING
             """,
             (code, customer_id, other_order_id, datetime.now(timezone.utc) - timedelta(days=1)),
         )

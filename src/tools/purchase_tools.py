@@ -9,8 +9,9 @@ Security guardrails (same class of concern as coupon balances):
   - Stock decrement is a single atomic guarded UPDATE (not read-check-write),
     so two concurrent orders for the last unit of something can't both
     succeed and oversell.
-  - If a coupon_code is given, applying it reuses coupon_tools.redeem_coupon
-    verbatim (ownership/expiry/atomic-balance checks included) rather than
+  - If a coupon_code or gold_sip_code is given, applying it reuses
+    coupon_tools.redeem_coupon / gold_sip_tools.redeem_gold_sip verbatim
+    (ownership/expiry/atomic-balance checks included) rather than
     re-implementing any of that here.
 """
 
@@ -22,6 +23,7 @@ from psycopg.rows import dict_row
 
 from src.db.connection import get_conn
 from src.tools.coupon_tools import redeem_coupon
+from src.tools.gold_sip_tools import redeem_gold_sip
 
 
 def _new_order_number(cur) -> str:
@@ -35,9 +37,17 @@ def _new_order_number(cur) -> str:
     raise RuntimeError("Could not generate a unique order number after 5 attempts.")
 
 
-def place_order(customer_id: str, sku: str, quantity: int = 1, size: str | None = None, coupon_code: str | None = None) -> dict:
-    """Place a new order for a product. Optionally applies a coupon's balance
-    to the total in the same call (via coupon_tools.redeem_coupon)."""
+def place_order(
+    customer_id: str,
+    sku: str,
+    quantity: int = 1,
+    size: str | None = None,
+    coupon_code: str | None = None,
+    gold_sip_code: str | None = None,
+) -> dict:
+    """Place a new order for a product. Optionally applies a coupon's or a
+    matured Gold SIP's balance to the total in the same call — not both (an
+    order can only carry one discount source; see the DB CHECK on orders)."""
     if not isinstance(quantity, int) or quantity < 1:
         return {"placed": False, "reason": "bad_quantity", "message": "Quantity must be a positive whole number."}
 
@@ -110,7 +120,9 @@ def place_order(customer_id: str, sku: str, quantity: int = 1, size: str | None 
         "placed_at": order["placed_at"].isoformat(),
     }
 
-    if coupon_code:
+    if coupon_code and gold_sip_code:
+        result["discount_error"] = "Only one of coupon_code or gold_sip_code can be applied to an order — pick one."
+    elif coupon_code:
         coupon_result = redeem_coupon(customer_id, coupon_code, order_number)
         result["coupon_applied"] = coupon_result.get("redeemed", False)
         if coupon_result.get("redeemed"):
@@ -120,5 +132,13 @@ def place_order(customer_id: str, sku: str, quantity: int = 1, size: str | None 
             # Order still stands even if the coupon didn't apply — report why
             # separately rather than rolling back a successful purchase.
             result["coupon_error"] = coupon_result.get("message")
+    elif gold_sip_code:
+        sip_result = redeem_gold_sip(customer_id, gold_sip_code, order_number)
+        result["gold_sip_applied"] = sip_result.get("redeemed", False)
+        if sip_result.get("redeemed"):
+            result["discount_cents"] = sip_result["discount_cents"]
+            result["final_amount_cents"] = total_amount_cents - sip_result["discount_cents"]
+        else:
+            result["gold_sip_error"] = sip_result.get("message")
 
     return result
