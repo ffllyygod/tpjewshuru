@@ -1,8 +1,248 @@
-# Dev Journal — TP Jewellers Chatbot
+# Dev Journal — DP Jewellers Chatbot
 
 Running log of what was built, what broke, and why decisions were made.
 Newest entries at the top. Written for two audiences at once: future-me
 debugging this at 2am, and interview-me explaining design choices out loud.
+
+---
+
+## 2026-08-16 (rebrand) — TP Jewellers is DP Jewellers
+
+Wholesale rename across source, prompts, seeds, tests, docs and the web app.
+Mechanically dull; three judgement calls in it worth recording.
+
+**Issued identifiers keep their `TPJ-` prefix. Only new ones are `DPJ-`.**
+Order numbers, SKUs, coupon codes, SIP codes and payment references are not
+branding — they are identifiers customers are holding. A coupon code in
+someone's inbox, an order number on an invoice already sent. Rewriting them
+would invalidate things people have in their hands and falsify the record of
+what was actually issued. Lookups are exact-string, so a mixed-prefix orders
+table works forever and is the *correct* outcome of a rebrand, not a defect.
+`scripts/rebrand_to_dp.py` reports how many such rows it left alone, so the
+choice is visible rather than an omission someone later "fixes".
+
+**The Railway project name stays `tpjewellers-chatbot`.** `.railway/railway.ts`
+passes it to `project()`, where it is the deployment's identity, not a label.
+Renaming it there would make the next apply target a *different* project and
+orphan the live one — Postgres volume, real orders and all. The dashboard rename
+preserves resources; the file follows afterwards. There's a comment on the line
+saying so, because it looks exactly like something a future rename would sweep up.
+
+**The local database was renamed by creating the new one inside the existing
+volume**, not by recreating the volume. `POSTGRES_DB` in docker-compose only
+takes effect on a fresh volume, and dropping it would have wiped the local
+SuperTokens database for no reason.
+
+`scripts/rebrand_to_dp.py` handles what a redeploy can't reach in a live DB:
+staff email addresses, and the knowledge-doc policy text the assistant quotes to
+customers verbatim. Idempotent, with `--dry-run`.
+
+Not done here, because they're outside the repo: renaming the Vercel and Railway
+projects and their domains, and the checkout directory. The session-storage key
+moved `tpj_access_token` → `dpj_access_token`, so anyone logged in gets signed
+out once.
+
+Suite: 340 passing, 1 skipped, unchanged by the rename.
+
+---
+
+## 2026-08-16 (advisor) — It sold like a database. Now it sells like a shop.
+
+Live testing said the assistant was transactionally correct and commercially
+useless. Four gaps, fixed together because they're one experience:
+
+1. **It didn't consult.** 90 lines of prompt on cancellation, two on how to
+   talk. No instruction to ask about occasion, recipient or budget — and
+   `search_products` couldn't have filtered on occasion if it had.
+2. **Ordering skipped what a real purchase needs.** No delivery address ever
+   asked for (`orders.shipping_address` existed and only seed scripts wrote it),
+   and `payment_status` hardcoded `'PAID'` — orders were *born* paid, with no
+   payment step in existence.
+3. **No bill.** Nothing modelled GST, making charges or line totals.
+4. **No way to want something changed.** Different metal, different stone, an
+   engraving — the only answer was the catalogue.
+
+### The invoice, and why the price never moves
+
+The load-bearing decision: **`price_cents` stays exactly the amount payable and
+the invoice decomposes it backwards.** GST-inclusive, not added on top. With
+M = metal, S = stone, K = making, and Indian jewellery GST of 3% on goods and 5%
+on making:
+
+```
+P = 1.03·(M + S) + 1.05·K,  K = M·r/100   ⇒   M = (P − 1.03·S) / (1.03 + 1.05·r/100)
+```
+
+So M is *solved for*. Adding tax on top would have moved `total_amount_cents`,
+every revenue figure, how much a coupon covers, and a pile of tests — for a
+number the customer already thinks they're paying.
+
+Every component is floored and the few paise left become an explicit **rounding
+adjustment** row. Folding the remainder into the metal line (the first thing I
+tried) makes the printed making charge no longer exactly r% of the printed metal
+and the printed GST no longer exactly 3% of the printed base: two small lies on
+the two lines anyone would check. One visible ₹0.02 row is the honest version,
+and it's what real GST invoices do. `_assert_balances` verifies the column sums
+to P before anything is returned — 20,000 random combinations, zero mismatches,
+and a test asserts it over every catalogue row.
+
+Exact rationals (`fractions.Fraction`), not float. Float drift is the precise
+thing this module exists to eliminate.
+
+**The rate is implied, never fetched.** Metal value over weight. A live market
+rate would render the same order differently on two consecutive turns and stop
+rendering when the feed is down; there's a test that makes `get_metal_rates`
+raise and asserts the invoice still comes out.
+
+### Seeding it backwards was wrong, twice
+
+First attempt: keep the existing flat ₹15,000–₹8,00,000 price range, solve the
+metal value out of it, derive weight at a fixed rate. That produced a **972 g
+silver bangle** — because a ₹1.8 lakh silver bangle is itself nonsense, and the
+weight was only the symptom. Patching it by suppressing implausible weights left
+31 of 50 products with no weight at all.
+
+The fix was to invert the generator: pick a plausible **weight** for the
+category, then derive the price *forward* through the same identity
+`billing.decompose_price` solves backwards. Silver now comes out cheap because
+silver is cheap. All 50 products decompose exactly, and the catalogue can't
+drift from the invoice because they're the same arithmetic run in both
+directions.
+
+### The money bug this created
+
+`place_order` now writes `PENDING`, which makes "cancelled before paying" a real
+state for the first time. `offer_settlement_options` didn't know that — it would
+have issued store credit worth **110% of a payment that was never taken**, and
+told the customer they were being refunded something they were never charged.
+Guarded in all three settlement entry points. The most adversarial test in the
+new suite asserts zero coupon rows afterwards.
+
+Two more of the same family, caught in review rather than production:
+- **COD cannot mean PAID.** Cash on delivery records the method and leaves the
+  order PENDING. Writing PAID would put in the database a fact nobody observed.
+- **Silver and platinum have no karat.** They're 925 and PT950. A deterministic
+  metal→purity map, because purity is a property of the metal, not a judgement.
+
+No confirmation token on `confirm_payment`, deliberately: cancelling is
+destructive and irreversible, paying is additive and idempotent. What guards it
+is structural — ownership re-checked, and an atomic `WHERE payment_status =
+'PENDING'` so two concurrent calls can't both take payment and a second one
+reports the existing reference instead of minting another.
+
+### What live testing changed, after the tests were green
+
+Three things no unit test would have caught:
+
+- **It dead-ended.** "Nothing minimal under ₹50,000 for an anniversary." A shop
+  assistant shows you the nearest thing. `search_products` now relaxes the
+  *soft* descriptors (style, then occasion) and says it did — but never the
+  budget, because showing someone a ₹2 lakh piece after they said ₹50,000 is
+  worse than showing them nothing.
+- **It dumped spec sheets**, and showed five results ordered cheapest-first — so
+  "around ₹50,000" was answered with a ₹1,038 ring. Default limit is now 3, and
+  a stated budget orders by *nearest to it* rather than cheapest. Making the
+  count deterministic worked where the prompt rule alone hadn't.
+- **It cancelled an unpaid order and said nothing about settlement either way.**
+  Whether money was taken is a fact `cancel_order` already holds, so it now
+  returns a `next_step` saying which case this is. The model then says "there
+  was no payment taken, so there is nothing to refund" — unprompted, because it
+  was told rather than instructed.
+
+That last one is the pattern this whole change keeps rediscovering: when the
+model skips a step, the fix is usually to hand it the fact, not to repeat the
+rule louder.
+
+### Prompt structure
+
+The advisor and tone rules went in mid-list first and were ignored; moved to the
+head of `_CUSTOMER_RULES` they started landing. The tone spec is an explicit
+split — enthusiastic about the jewellery, flat and precise about money — because
+"be warm" alone produced the old voice, and enthusiasm on a payment turn reads as
+a sales push.
+
+The opener is appended only on a customer's first turn, computed from
+`len(messages) <= 1` in the orchestrator. Same shape as the date rule: which turn
+this is, is a fact we hold and the model doesn't.
+
+### One more instance of the same lesson
+
+The model kept presenting relaxed results as an exact match — "here are some
+minimalistic options" — when *minimal* was precisely the filter that had found
+nothing. Both the tool note and the prompt told it to say what didn't match.
+Neither worked.
+
+What worked was writing the sentence for it. `search_products` now returns
+`say_first` ("I haven't got anything minimal in that range, but these come
+closest —") and the prompt says to open with it verbatim. It comes out word for
+word. That is the third time in this change the fix was to hand the model a
+string instead of an instruction, after `invoice_markdown` and `cancel_order`'s
+`next_step` — the same principle as the `_display` fields, just applied to prose
+rather than arithmetic.
+
+Schema is additive and `scripts/migrate_invoicing.py` follows the established
+pattern — **run it against Railway before deploying**, or every invoice call
+errors on missing columns. It deliberately does not backfill weights for
+existing products: `billing.decompose_price` degrades honestly on NULLs
+("weight not on record"), which is the correct answer for a real product nobody
+has measured.
+
+Suite: 241 → 340 passing, 1 skipped.
+
+---
+
+## 2026-08-16 — The model didn't know what year it was
+
+Found in live testing. Asked **"any cancellations this month?"**, the staff
+assistant answered about **October 2023** — and reported the (naturally empty)
+result as a fact: no cancellations. October 2023 is roughly where the model's
+training data ends. With no clock anywhere in its context, "this month" resolved
+to the last month it had ever seen.
+
+This is the same failure class as the rupee arithmetic and the summed stock
+column: we asked the LLM to know something a deterministic function could just
+tell it. It doesn't have a clock. It will confabulate one, confidently, and the
+output looks exactly like a correct answer.
+
+Fixed in three layers, deliberately, because the first two are prompt-shaped and
+prompts are not guarantees:
+
+**1. Tell it the date.** `prompt_for()` now appends today's date to both
+personas, computed **per call** — a module-level constant would have been correct
+until the first midnight after deploy and silently wrong every day after, which
+is a worse bug than the one being fixed. UTC, not IST, because every date filter
+in `src/tools/` is UTC; a prompt in IST and tools in UTC would disagree for 5.5
+hours a day.
+
+**2. Give it a way to not need the date.** `admin_find_orders` now takes
+`period` (the same vocabulary `admin_sales_summary` already used, resolved by the
+same `_resolve_period`), so "this month" never requires the model to compute a
+range at all. It returns `period_label` — the range actually searched — because
+an empty result is only interpretable alongside the window it came from.
+
+**3. Refuse ranges that cannot contain data.** `_guard_model_supplied_range`
+compares any explicit `start_date`/`end_date` against `MIN/MAX(placed_at)` and
+raises if the range lies entirely outside it. A staff member never asks about a
+window with no orders in it; a model that guessed the year does. This is the only
+layer that holds when the prompt doesn't take.
+
+The error message carries **both** facts the model was missing — the real data
+window *and* today's date — plus an instruction to use a relative period. A tool
+error the model can't correct from is just a slower wrong answer; this one it can
+act on in a single retry.
+
+### What this broke, and what that revealed
+
+Two existing tests failed immediately: `test_empty_period_returns_zeroes_not_a_crash`
+and its breakdown twin both queried January **2019** to exercise the zero-row
+arithmetic. The guard was doing its job — that range is exactly the shape it
+rejects. But the property those tests pin is real and separate (`period='today'`
+before the day's first sale gets you zero rows legitimately, in-window), so they
+now patch `_order_data_window` to cover 2019 rather than being deleted. One
+guard hiding another test's coverage is how a suite quietly stops being worth
+running.
+
+Full suite: 241 passed.
 
 ---
 
@@ -323,15 +563,15 @@ refuse with **zero** tool calls — the staff tools aren't advertised to them.
   and **category mix** shifting with it, not just volume. Order status is
   derived from order age, never random per row. Generators run last and re-seed
   the RNG, so history volume can be tuned without shifting the stream that
-  produces the pinned `TPJ-10000`–`TPJ-10004` test fixtures.
-- History orders use a `TPJ-H` prefix: `place_order` mints
-  `TPJ-{100000..999999}`, so a numeric range would eventually collide.
+  produces the pinned `DPJ-10000`–`DPJ-10004` test fixtures.
+- History orders use a `DPJ-H` prefix: `place_order` mints
+  `DPJ-{100000..999999}`, so a numeric range would eventually collide.
 - `payment_status` is now CHECK-constrained and uppercase-only. The live DB held
   both `PAID` and `paid`; every revenue query filtering on `'PAID'` was silently
   dropping rows.
 - `tests/conftest.py` (the first one in this repo) asserts the DB is seeded and
   fails once with the fix command. The suite mutates its own fixtures — the
-  cancellation test really cancels `TPJ-10000` — so a second run without a
+  cancellation test really cancels `DPJ-10000` — so a second run without a
   reseed produced five failures that look exactly like regressions. That has
   cost real debugging time more than once.
 
@@ -374,7 +614,7 @@ no retry of the dead one, and a bad-model 400 correctly returned
 
 **Gotcha for future-me**: the 5 test failures seen before the reseed
 (`test_full_cancellation_happy_path` and friends) were just the documented
-stale-DB state — the happy-path test really cancels `TPJ-10000`, so the
+stale-DB state — the happy-path test really cancels `DPJ-10000`, so the
 suite is not idempotent without `seed_db.py --reset`. Not a regression.
 
 **Still to do**: production only has the one original key in Railway's env —
@@ -510,8 +750,8 @@ image on any platform, not Railway-specific — the earlier config just didn't
 account for it. Once initialized, the volume was **correctly empty** (new
 persistent disk, no relation to the old ephemeral one) — restored the
 pre-change backup via `pg_restore --no-owner --no-privileges`, verified the
-exact rows that mattered (`TPJ-668172`, `TPJ-DEMO01` CANCELLED,
-`TPJ-CPN-1ZCDNCBPCG` remaining ₹32,500) were back byte-for-byte.
+exact rows that mattered (`DPJ-668172`, `DPJ-DEMO01` CANCELLED,
+`DPJ-CPN-1ZCDNCBPCG` remaining ₹32,500) were back byte-for-byte.
 
 One more problem after that: the `api` service's connection pool held
 connections opened *before* Postgres restarted for the volume attach — those
@@ -660,7 +900,7 @@ still matters even with good coverage:**
    Diamond Solitaire Ring, ₹3,25,000," customer said yes — but the `place_order` call
    that followed used a SKU that was never returned by any tool call in the conversation
    (looked plausible, wasn't real) and failed; the model then searched again, got real
-   results, but picked a *different, unrelated* SKU (`TPJ-RIN-1010`, a silver/emerald
+   results, but picked a *different, unrelated* SKU (`DPJ-RIN-1010`, a silver/emerald
    ring, ₹1,22,094.97) for the actual order — while still describing the purchase as the
    rose gold ring in its reply. This is not a display bug: **a materially different,
    wrong-priced product was actually purchased** than what the customer confirmed. This
@@ -671,7 +911,7 @@ still matters even with good coverage:**
    verbatim from a tool result **in this turn or the previous one** (never recalled from
    memory), and requires stating the SKU alongside the name when confirming, so a
    mismatch is at least visible in the transcript. Retested the same scenario — correct
-   product ordered, verified against Postgres (`sku = TPJ-RIN-DEMO1`, matching the
+   product ordered, verified against Postgres (`sku = DPJ-RIN-DEMO1`, matching the
    confirmed name and price). **Improved, not proven eliminated** — this class of bug
    needs a structural fix (e.g. a UI that has the customer click/select a specific listed
    item rather than the model transcribing an ID) to be truly closed, not just a better
@@ -799,7 +1039,7 @@ new unit tests, which is exactly why live verification still matters):
    right.
 
 **Live-verified full loop, real DB state checked at every step, not just
-the model's claimed reply text**: cancel TPJ-DEMO01 → auto-chained
+the model's claimed reply text**: cancel DPJ-DEMO01 → auto-chained
 settlement offer ($2,850 cash vs. $3,135 coupon, correct $ this time) →
 chose coupon → issued (`coupons` row confirmed: $3,135.00, ACTIVE) →
 browsed necklaces → placed a $3,064.76 order applying the coupon in one
@@ -877,10 +1117,10 @@ changes to the tool-loop logic itself, which is the whole point of keeping
 `_call_model()` as the one swap seam.
 
 Live-reverified the full flow against OpenRouter/DeepSeek: "what are my
-orders?" (8.4s) → "cancel TPJ-DEMO01" (5.9s, correctly paused for
-confirmation) → "yes" (5.2s, actually cancelled — verified `TPJ-DEMO01`
+orders?" (8.4s) → "cancel DPJ-DEMO01" (5.9s, correctly paused for
+confirmation) → "yes" (5.2s, actually cancelled — verified `DPJ-DEMO01`
 flipped to `CANCELLED` in Postgres, clean 3-call `tool_call_log` trace) →
-wrong-status rejection on TPJ-DEMO02 (5.7s, correctly refused). **Total
+wrong-status rejection on DPJ-DEMO02 (5.7s, correctly refused). **Total
 ~19s for the 3-turn cancel flow**, versus 6+ minutes before. This is the
 actual demo-ready state.
 
@@ -962,7 +1202,7 @@ for the UI to work (`.env.local` points `NEXT_PUBLIC_API_BASE` at the API).
 ## 2026-08-15 (later still) — Live end-to-end test found a real bug: token transcription
 
 First live conversation through llama3.1:8b (via Ollama, no external API): asked
-for orders, requested cancellation of TPJ-DEMO01, model correctly paused and
+for orders, requested cancellation of DPJ-DEMO01, model correctly paused and
 asked for explicit confirmation (prompt guardrail working). On "confirm", the
 model called `cancel_order` with `confirmation_token: "<insert confirmation
 token here>"` — a placeholder, not the actual 22-char token it had received
@@ -987,9 +1227,9 @@ if the orchestrator can look it up itself, have it look it up itself.
 
 Re-tested live after the fix: full flow (ask orders → request cancel →
 model asks for confirmation → user confirms → cancel_order succeeds)
-verified against the real DB (`TPJ-DEMO01` flipped to `CANCELLED`,
+verified against the real DB (`DPJ-DEMO01` flipped to `CANCELLED`,
 `tool_call_log` has the clean 2-call trace). Also verified: wrong-status
-rejection (TPJ-DEMO02, already shipped, correctly refused + redirected to
+rejection (DPJ-DEMO02, already shipped, correctly refused + redirected to
 return policy) and anonymous-session policy Q&A (no login, natural-language
 ring-sizing question, correct answer from the FTS-fixed knowledge tool).
 
@@ -1076,7 +1316,7 @@ phrase results well," not "is the underlying logic even correct."
 **Added a personal demo customer** (`scripts/add_demo_user.py`) — Arun,
 with two orders in different states (one cancellable, one already shipped)
 and two new named products, on top of the randomized Faker seed data. Makes
-the live demo conversation feel real instead of talking to `TPJ-10007`.
+the live demo conversation feel real instead of talking to `DPJ-10007`.
 
 ---
 

@@ -41,6 +41,30 @@ from psycopg.rows import dict_row
 from src.db.connection import get_conn
 from src.tools.formatting import format_inr
 
+def _nothing_to_settle(order) -> dict | None:
+    """Refuse to settle an order no money was ever taken for.
+
+    Since place_order creates orders as PENDING, "cancelled before paying" is a
+    real and common state. Without this check, cancelling an unpaid order would
+    mint store credit worth 110% of a payment that never happened — the store
+    would be handing out money for nothing, and the customer would be told they
+    were being refunded something they never paid.
+
+    Checked in all three settlement entry points rather than once, because each
+    is separately reachable by the model.
+    """
+    if order["payment_status"] == "PENDING":
+        return {
+            "error": "nothing_to_settle",
+            "message": (
+                "No payment was taken for this order, so there's nothing to refund and no "
+                "store credit to issue. Tell the customer plainly that they were never "
+                "charged — do not offer them a refund or a coupon."
+            ),
+        }
+    return None
+
+
 SETTLEMENT_SOURCE_STATUSES = {"CANCELLED": "cancellation", "RETURNED": "return"}
 
 
@@ -88,7 +112,7 @@ def mint_coupon(
             f"source_type='{source_type}' requires exactly {expected} source id, got {sources}."
         )
     total_cents = round(amount_cents * (1 + float(bonus_percent) / 100))
-    code = f"TPJ-CPN-{secrets.token_urlsafe(9).replace('_', '').replace('-', '').upper()[:12]}"
+    code = f"DPJ-CPN-{secrets.token_urlsafe(9).replace('_', '').replace('-', '').upper()[:12]}"
     expires_at = datetime.now(timezone.utc) + timedelta(days=expiry_days)
     cur.execute(
         """
@@ -108,7 +132,8 @@ def offer_settlement_options(customer_id: str, order_number: str) -> dict:
     cancelled/returned order. Read-only — creates nothing."""
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT id, status, total_amount_cents FROM orders WHERE order_number = %s AND customer_id = %s",
+            "SELECT id, status, total_amount_cents, payment_status FROM orders "
+            "WHERE order_number = %s AND customer_id = %s",
             (order_number, customer_id),
         )
         order = cur.fetchone()
@@ -121,6 +146,8 @@ def offer_settlement_options(customer_id: str, order_number: str) -> dict:
                 "error": "not_settleable",
                 "message": f"Order is {order['status']} — settlement options only apply to a cancelled or returned order.",
             }
+        if unpaid := _nothing_to_settle(order):
+            return unpaid
 
         # Already issued? Show the existing coupon rather than a fresh offer.
         cur.execute("SELECT code, total_cents, status FROM coupons WHERE source_order_id = %s", (order["id"],))
@@ -158,7 +185,8 @@ def issue_coupon(customer_id: str, order_number: str, conversation_id: str) -> d
     re-calling for an already-settled order returns the existing coupon."""
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT id, status, total_amount_cents FROM orders WHERE order_number = %s AND customer_id = %s",
+            "SELECT id, status, total_amount_cents, payment_status FROM orders "
+            "WHERE order_number = %s AND customer_id = %s",
             (order_number, customer_id),
         )
         order = cur.fetchone()
@@ -168,6 +196,8 @@ def issue_coupon(customer_id: str, order_number: str, conversation_id: str) -> d
         source_type = SETTLEMENT_SOURCE_STATUSES.get(order["status"])
         if not source_type:
             return {"error": "not_settleable", "message": f"Order is {order['status']} — not eligible for a coupon."}
+        if unpaid := _nothing_to_settle(order):
+            return unpaid
 
         cur.execute("SELECT code, total_cents, expires_at, status FROM coupons WHERE source_order_id = %s", (order["id"],))
         existing = cur.fetchone()
@@ -225,7 +255,7 @@ def request_cash_refund(customer_id: str, order_number: str) -> dict:
     resulting payment_status), it doesn't move money."""
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT id, status FROM orders WHERE order_number = %s AND customer_id = %s",
+            "SELECT id, status, payment_status FROM orders WHERE order_number = %s AND customer_id = %s",
             (order_number, customer_id),
         )
         order = cur.fetchone()
@@ -233,6 +263,8 @@ def request_cash_refund(customer_id: str, order_number: str) -> dict:
             return {"error": "not_found", "message": f"No order {order_number} found for this customer."}
         if order["status"] not in SETTLEMENT_SOURCE_STATUSES:
             return {"error": "not_settleable", "message": f"Order is {order['status']} — not eligible for a refund."}
+        if unpaid := _nothing_to_settle(order):
+            return unpaid
 
         cur.execute("UPDATE orders SET payment_status = 'REFUND_PENDING' WHERE id = %s", (order["id"],))
         cur.execute(

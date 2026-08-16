@@ -54,13 +54,13 @@ def test_tool_call_then_final_answer():
 
     responses = [
         _fake_call("", "list_customer_orders", {}),
-        _fake_call("You have 2 orders: TPJ-DEMO01 and TPJ-DEMO02.", None, None),
+        _fake_call("You have 2 orders: DPJ-DEMO01 and DPJ-DEMO02.", None, None),
     ]
 
     with patch.object(orchestrator, "_call_model", side_effect=responses):
         reply = orchestrator.run_turn(conv_id, customer_id, "what are my orders?")
 
-    assert "TPJ-DEMO01" in reply
+    assert "DPJ-DEMO01" in reply
 
     # Audit log should have exactly one entry for this conversation.
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -76,12 +76,12 @@ def test_customer_id_is_injected_not_agent_controlled():
     conv_id = _new_conversation(customer_id)
 
     responses = [
-        _fake_call("", "get_order_status", {"order_number": "TPJ-DEMO01", "customer_id": "not-a-real-id"}),
+        _fake_call("", "get_order_status", {"order_number": "DPJ-DEMO01", "customer_id": "not-a-real-id"}),
         _fake_call("Your order is placed.", None, None),
     ]
 
     with patch.object(orchestrator, "_call_model", side_effect=responses):
-        orchestrator.run_turn(conv_id, customer_id, "status of TPJ-DEMO01?")
+        orchestrator.run_turn(conv_id, customer_id, "status of DPJ-DEMO01?")
 
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT result FROM tool_call_log WHERE conversation_id = %s", (conv_id,))

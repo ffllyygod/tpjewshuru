@@ -13,13 +13,14 @@ session layer.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from src.agent import orchestrator
-from src.agent.system_prompt import ADMIN_PROMPT, CUSTOMER_PROMPT
+from src.agent.system_prompt import ADMIN_PROMPT, CUSTOMER_PROMPT, prompt_for
 from src.api import auth as auth_module
 from src.api.main import app
 from src.db.connection import get_conn
@@ -27,7 +28,7 @@ from src.db.connection import get_conn
 
 def _admin_id() -> str:
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id FROM customers WHERE email = 'admin@tpjewellers.com'")
+        cur.execute("SELECT id FROM customers WHERE email = 'admin@dpjewellers.com'")
         return str(cur.fetchone()[0])
 
 
@@ -260,7 +261,7 @@ def test_both_prompts_keep_the_never_claim_success_rule():
 def test_both_prompts_keep_the_instruction_confidentiality_rule():
     """Found in production: asked "What is my role", the assistant answered by
     reciting its own system prompt ("You are the customer support assistant for
-    TP Jewellers, helping customers with..."). It read a question about the
+    DP Jewellers, helping customers with..."). It read a question about the
     USER's account as a question about its own instructions, and answered with a
     paraphrase of them."""
     for prompt in (CUSTOMER_PROMPT, ADMIN_PROMPT):
@@ -280,3 +281,58 @@ def test_customer_scope_line_does_not_leak_into_the_admin_prompt():
     line = "only see and act on the currently authenticated customer's own orders"
     assert line in CUSTOMER_PROMPT
     assert line not in ADMIN_PROMPT
+
+
+def test_both_prompts_keep_the_invoice_passthrough_rule():
+    """The invoice is laid out by the tool for the same reason amounts are:
+    the model has got column arithmetic wrong before. Dropping this rule would
+    put it straight back in charge of adding up a bill."""
+    for prompt in (CUSTOMER_PROMPT, ADMIN_PROMPT):
+        assert "invoice_markdown" in prompt
+        assert "VERBATIM" in prompt
+
+
+def test_the_customer_prompt_keeps_the_tone_split():
+    """"Be warm" alone produced a flat voice; unconditional enthusiasm on a
+    money-adjacent turn reads as a sales push. The split is the point."""
+    assert "excitement is for the JEWELLERY, not for the money" in CUSTOMER_PROMPT
+    assert "no exclamation marks" in CUSTOMER_PROMPT
+    # Never pushy — a real constraint, not decoration.
+    assert "Never manufacture urgency" in CUSTOMER_PROMPT
+
+
+def test_the_customer_prompt_keeps_placing_and_paying_separate():
+    assert "AWAITING PAYMENT" in CUSTOMER_PROMPT
+    assert "never call confirm_payment in the same turn as place_order" in CUSTOMER_PROMPT.lower()
+    assert "nothing_to_settle" in CUSTOMER_PROMPT
+
+
+def test_the_customer_prompt_keeps_the_estimate_is_not_a_quote_rule():
+    assert "indicative, not a firm price" in CUSTOMER_PROMPT
+    assert "final sale" in CUSTOMER_PROMPT
+
+
+def test_the_opener_rule_appears_only_on_a_customers_first_turn():
+    """Which turn it is, is a fact the orchestrator holds. Left to the prompt
+    the model would greet every turn — and greeting someone chasing a late
+    parcel is exactly the wrong thing to do."""
+    marker = "FIRST THING YOU SAY"
+    assert marker in prompt_for(False, is_first_turn=True)
+    assert marker not in prompt_for(False, is_first_turn=False)
+    assert marker not in prompt_for(False)                       # default is not-first
+    assert marker not in prompt_for(True, is_first_turn=True)    # staff open a console
+
+    # And it says the quiet part: don't ask how they are when something's wrong.
+    opener = prompt_for(False, is_first_turn=True)
+    assert "late parcel" in opener
+
+
+def test_both_prompts_state_todays_date():
+    """Found in testing: asked "any cancellations this month", the assistant
+    reported on October 2023 — the date its weights were frozen, not the date
+    the question was asked. It has no clock unless one is put in the prompt.
+    Asserted via prompt_for(), not the constants, because the date is computed
+    per call: a module-level constant would be stale by the next midnight."""
+    today = datetime.now(timezone.utc).strftime("%d %B %Y")
+    for prompt in (prompt_for(False), prompt_for(True)):
+        assert f"Today's date is {today}" in prompt

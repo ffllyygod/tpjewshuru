@@ -4,11 +4,11 @@ services:
     ports:
       - "${POSTGRES_PORT:-5433}:5432"
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-tpjewellers}
+      POSTGRES_DB: ${POSTGRES_DB:-dpjewellers}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     volumes:
-      - tpjewellers_postgres_data:/var/lib/postgresql/data
+      - dpjewellers_postgres_data:/var/lib/postgresql/data
       - ./scripts/init-supertokens-db.sql:/docker-entrypoint-initdb.d/init-supertokens-db.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
@@ -35,4 +35,4 @@ services:
       retries: 10
 
 volumes:
-  tpjewellers_postgres_data:
+  dpjewellers_postgres_data:

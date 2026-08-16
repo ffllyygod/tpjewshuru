@@ -2,7 +2,7 @@
 email recipe. See JOURNAL.md and docs/ARCHITECTURE.md for the full rationale.
 
 Design:
-  - Login only, for EXISTING TP Jewellers customers (email already in our
+  - Login only, for EXISTING DP Jewellers customers (email already in our
     `customers` table). This chatbot doesn't handle new-customer signup.
   - `create_code_post` is overridden to check our `customers` table BEFORE
     letting SuperTokens create/send a real code. If the email isn't a known
@@ -148,7 +148,7 @@ def _build_email_service() -> Union[SMTPService, "ResendEmailService", None]:
                 username=smtp_user,
                 password=smtp_password,
                 secure=False,  # STARTTLS on 587, not implicit TLS
-                from_=SMTPSettingsFrom(name="TP Jewellers", email=smtp_from),
+                from_=SMTPSettingsFrom(name="DP Jewellers", email=smtp_from),
             )
         )
     return None
@@ -159,7 +159,7 @@ def init_auth() -> None:
 
     supertokens_init(
         app_info=InputAppInfo(
-            app_name="TP Jewellers",
+            app_name="DP Jewellers",
             api_domain=API_DOMAIN,
             website_domain=WEBSITE_DOMAIN,
             api_base_path="/auth",

@@ -79,7 +79,7 @@ export default function LoginScreen({ onLoggedIn, onBrowseAnonymously }: Props) 
       <div className="w-full max-w-sm">
         <div className="mb-8 text-center">
           <p className="text-xs tracking-[0.3em] text-[var(--color-gold)] uppercase mb-2">
-            TP Jewellers
+            DP Jewellers
           </p>
           <h1 className="font-display text-3xl text-[var(--color-fg)]">
             Concierge

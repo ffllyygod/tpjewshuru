@@ -322,7 +322,7 @@ def cancel_order(
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            SELECT id, status, placed_at
+            SELECT id, status, placed_at, payment_status
             FROM orders
             WHERE order_number = %s AND customer_id = %s
             """,
@@ -392,7 +392,25 @@ def cancel_order(
         "reason_note": note,
         "restocked_items": restocked,
         "message": "Order cancelled successfully.",
+        # Whether money was taken is a fact this function already has, and it
+        # decides what happens next. Saying so here beats a prompt rule the
+        # model can skip: live testing caught it cancelling an unpaid order and
+        # then simply not mentioning settlement either way.
+        "next_step": _settlement_next_step(order["payment_status"]),
     }
+
+
+def _settlement_next_step(payment_status: str) -> str:
+    if payment_status == "PENDING":
+        return (
+            "No payment was ever taken for this order. There is nothing to refund and no store "
+            "credit to issue — do NOT call offer_settlement_options. Tell the customer plainly "
+            "that they were never charged."
+        )
+    return (
+        "Call offer_settlement_options NOW, in this same turn, and present both the cash refund "
+        "and the coupon before asking which they'd prefer."
+    )
 
 
 def check_return_eligibility(customer_id: str, order_number: str, conversation_id: str) -> dict:

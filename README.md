@@ -1,4 +1,4 @@
-# TP Jewellers Chatbot
+# DP Jewellers Chatbot
 
 A tool-calling agent (not classic RAG) for an Indian jewellery e-commerce store,
 serving **three audiences from one chat window**: anonymous browsers, logged-in
@@ -39,7 +39,7 @@ don't need an OTP inbox to try a logged-in persona:
 ```
 .venv/Scripts/python scripts/chat_cli.py                                # anonymous
 .venv/Scripts/python scripts/chat_cli.py arun@shurutech.com             # as a customer
-.venv/Scripts/python scripts/chat_cli.py admin@tpjewellers.com --admin  # staff console
+.venv/Scripts/python scripts/chat_cli.py admin@dpjewellers.com --admin  # staff console
 ```
 
 The CLI bypasses HTTP auth by design (it's a local dev harness) but **not** any

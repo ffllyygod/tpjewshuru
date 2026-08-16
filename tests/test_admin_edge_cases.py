@@ -12,6 +12,10 @@ did report six out-of-stock products as none.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from unittest.mock import patch
+
 import pytest
 
 from src.tools import admin_tools
@@ -38,6 +42,7 @@ def _any_order_number(status: str = "CANCELLED") -> str:
         (lambda: admin_tools.admin_find_orders(ACTOR, status="delivered!"), "bad_status"),
         (lambda: admin_tools.admin_find_orders(ACTOR, start_date="last tuesday"), "bad_date"),
         (lambda: admin_tools.admin_find_orders(ACTOR, end_date="31/07/2026"), "bad_date"),
+        (lambda: admin_tools.admin_find_orders(ACTOR, period="this month"), "bad_period"),
         (lambda: admin_tools.admin_find_customer(ACTOR, query=""), "empty_query"),
         (lambda: admin_tools.admin_find_customer(ACTOR, query="   "), "empty_query"),
         (lambda: admin_tools.admin_inventory_status(ACTOR, filter="all", category="tiara"), "bad_category"),
@@ -53,6 +58,59 @@ def test_bad_input_errors_instead_of_returning_a_plausible_empty_result(call, ex
     assert result.get("error") == expected_error, result
     # The message must tell the model how to fix it, or it can't self-correct.
     assert result.get("message")
+
+
+@pytest.mark.parametrize(
+    "call,expected_error",
+    [
+        # The exact shape of the live failure: the model, with no clock in
+        # context, answered "any cancellations this month" about October 2023.
+        (lambda: admin_tools.admin_find_orders(
+            ACTOR, status="CANCELLED", start_date="2023-10-01", end_date="2023-10-31"), "bad_date"),
+        (lambda: admin_tools.admin_find_orders(ACTOR, end_date="2023-10-31"), "bad_date"),
+        (lambda: admin_tools.admin_find_orders(ACTOR, start_date="2099-01-01"), "bad_date"),
+        (lambda: admin_tools.admin_sales_summary(
+            ACTOR, period="custom", start_date="2023-10-01", end_date="2023-10-31"), "bad_period"),
+    ],
+)
+def test_a_date_range_with_no_possible_data_errors_instead_of_reporting_zero(call, expected_error):
+    """The load-bearing half of the date fix. Telling the model today's date
+    handles the common case, but a prompt is not a guarantee — an empty result
+    from a hallucinated year is indistinguishable from "nothing happened", and
+    the model reported it as exactly that. Erroring makes it self-correctable."""
+    result = call()
+    assert result.get("error") == expected_error, result
+    # The message has to carry both facts the model was missing, or it will
+    # simply guess a second wrong range.
+    assert "orders exist for" in result["message"]
+    assert "Today's date is" in result["message"]
+
+
+def test_a_valid_range_inside_the_data_window_is_not_blocked():
+    """The guard must reject only ranges that cannot contain data. A real
+    historical question is still a real question."""
+    lo, hi = admin_tools._order_data_window()
+    result = admin_tools.admin_find_orders(
+        ACTOR,
+        start_date=lo.strftime("%Y-%m-%d"),
+        end_date=hi.strftime("%Y-%m-%d"),
+        limit=5,
+    )
+    assert "error" not in result, result
+
+
+def test_period_filter_scopes_to_a_labelled_window():
+    """"Any cancellations this month?" must resolve server-side. Left to the
+    model, it invented a date range from its training prior and reported on
+    2023 — the whole reason `period` exists on this tool."""
+    scoped = admin_tools.admin_find_orders(ACTOR, status="CANCELLED", period="month", limit=50)
+    assert "error" not in scoped, scoped
+    # The label is what the model quotes back; without it an empty result is
+    # indistinguishable from "we searched the wrong year".
+    assert scoped["period_label"]
+
+    unscoped = admin_tools.admin_find_orders(ACTOR, status="CANCELLED", limit=50)
+    assert scoped["row_count"] <= unscoped["row_count"]
 
 
 def test_status_filter_is_case_insensitive_for_valid_values():
@@ -114,11 +172,29 @@ def test_limits_are_clamped_not_trusted():
     assert admin_tools.admin_inventory_status(ACTOR, filter="all", limit=-5)["row_count"] >= 1
 
 
+@contextmanager
+def _data_window_covering(start: str, end: str):
+    """Widen the out-of-range date guard so an intentionally empty period can
+    still reach the aggregation code below.
+
+    The guard and the zero-row arithmetic are separate properties: the guard
+    stops the model reporting on a year it hallucinated, while these tests pin
+    that genuinely-zero rows don't divide by zero (period='today' before the
+    first sale of the day is a real, in-window way to get there). Patching keeps
+    both tested instead of one hiding the other.
+    """
+    lo = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+    hi = datetime.fromisoformat(end).replace(tzinfo=timezone.utc)
+    with patch.object(admin_tools, "_order_data_window", return_value=(lo, hi)):
+        yield
+
+
 def test_empty_period_returns_zeroes_not_a_crash():
     """A period with no orders must not divide by zero computing AOV or the
     period-over-period change."""
-    result = admin_tools.admin_sales_summary(
-        ACTOR, period="custom", start_date="2019-01-01", end_date="2019-01-02")
+    with _data_window_covering("2019-01-01", "2019-01-02"):
+        result = admin_tools.admin_sales_summary(
+            ACTOR, period="custom", start_date="2019-01-01", end_date="2019-01-02")
     assert result["order_count"] == 0
     assert result["net_revenue_cents"] == 0
     assert result["aov_cents"] == 0
@@ -127,9 +203,10 @@ def test_empty_period_returns_zeroes_not_a_crash():
 
 
 def test_breakdown_on_empty_period_does_not_divide_by_zero():
-    result = admin_tools.admin_sales_breakdown(
-        ACTOR, dimension="category", period="custom",
-        start_date="2019-01-01", end_date="2019-01-02")
+    with _data_window_covering("2019-01-01", "2019-01-02"):
+        result = admin_tools.admin_sales_breakdown(
+            ACTOR, dimension="category", period="custom",
+            start_date="2019-01-01", end_date="2019-01-02")
     assert result["rows"] == []
     assert result["period_total_cents"] == 0
 

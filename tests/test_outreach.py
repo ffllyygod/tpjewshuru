@@ -27,7 +27,7 @@ REASON = "test: reviewed and the claim checks out"
 @pytest.fixture
 def actor() -> str:
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id FROM customers WHERE email = 'admin@tpjewellers.com'")
+        cur.execute("SELECT id FROM customers WHERE email = 'admin@dpjewellers.com'")
         return str(cur.fetchone()[0])
 
 
@@ -57,7 +57,7 @@ def customer() -> dict:
 
 
 def _expiring_coupon(customer_id: str, days: int = 10, remaining: int = 500000) -> str:
-    code = f"TPJ-CPN-{uuid.uuid4().hex[:10].upper()}"
+    code = f"DPJ-CPN-{uuid.uuid4().hex[:10].upper()}"
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -125,7 +125,7 @@ def test_dormant_means_dormant(customer):
             INSERT INTO orders (order_number, customer_id, status, placed_at, total_amount_cents)
             VALUES (%s, %s, 'DELIVERED', now() - interval '1 day', %s) RETURNING id
             """,
-            (f"TPJ-V{uuid.uuid4().hex[:6].upper()}", customer["id"],
+            (f"DPJ-V{uuid.uuid4().hex[:6].upper()}", customer["id"],
              outreach_tools.VIP_LIFETIME_CENTS * 2),
         )
         order_id = cur.fetchone()[0]
@@ -155,7 +155,7 @@ def test_staff_accounts_are_never_marketed_to(actor):
 FACTS = {
     "customer_name": "Liam",
     "product_name": "Gold Drop Earrings",
-    "order_number": "TPJ-H00015",
+    "order_number": "DPJ-H00015",
     "order_total_display": "₹11,51,500.74",
 }
 
@@ -164,13 +164,13 @@ FACTS = {
     "message,grounded",
     [
         ("Hi Liam, your Gold Drop Earrings turn one this month.", True),
-        ("Hi Liam, order TPJ-H00015 turns one this month.", True),
+        ("Hi Liam, order DPJ-H00015 turns one this month.", True),
         ("Hi Liam, your ₹11,51,500.74 purchase deserves a companion.", True),
         # The failure modes, in order of how plausible they look:
         ("Hi Liam, here's ₹2,50,000 off your next piece!", False),
-        ("Hi Liam, order TPJ-999999 is due a refresh.", False),
-        ("Hi Liam, we've reserved TPJ-RIN-1010 for you.", False),
-        ("Hi Liam, redeem coupon TPJ-CPN-FAKE123 today.", False),
+        ("Hi Liam, order DPJ-999999 is due a refresh.", False),
+        ("Hi Liam, we've reserved DPJ-RIN-1010 for you.", False),
+        ("Hi Liam, redeem coupon DPJ-CPN-FAKE123 today.", False),
     ],
 )
 def test_grounding_check(message, grounded):

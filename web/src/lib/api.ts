@@ -4,7 +4,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
 // different domains). Stored in sessionStorage: cleared when the tab closes,
 // which is the right lifetime for a demo concierge chat, not a "remember me"
 // product. See JOURNAL.md / src/api/auth.py for the full rationale.
-const ACCESS_TOKEN_KEY = "tpj_access_token";
+const ACCESS_TOKEN_KEY = "dpj_access_token";
 
 export function getStoredAccessToken(): string | null {
   if (typeof window === "undefined") return null;

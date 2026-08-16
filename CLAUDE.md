@@ -1,13 +1,17 @@
-# TP Jewellers Chatbot
+# DP Jewellers Chatbot
 
-Tool-calling AI agent for TP Jewellers (jewellery e-commerce): product
+Tool-calling AI agent for DP Jewellers (jewellery e-commerce): product
 browsing/recommendations, order status, cancellation (with guardrails),
 coupon-instead-of-refund settlement, Gold SIP schemes, and store policy Q&A.
 Built under a 48-hour demo deadline starting 2026-08-15.
 
 **Live deployment**: frontend `https://tpjewellers-chatbot.vercel.app`,
 backend `https://api-production-dd5a.up.railway.app`, Postgres on Railway
-(`pgvector/pgvector:pg16`, same image as local). **Never run
+(`pgvector/pgvector:pg16`, same image as local). The hosts still carry the
+pre-rebrand name — renaming the Vercel and Railway projects is a dashboard
+action that preserves their resources, and `.railway/railway.ts` must only
+be updated to match *after* that (the string there is the project's identity,
+so changing it first would orphan the live deployment). **Never run
 `scripts/seed_db.py --reset` against the Railway `DATABASE_URL`** unless you
 mean to wipe production data — it's real, persisted, and someone may be
 mid-testing it.
@@ -66,6 +70,12 @@ product in prose; mitigated, not proven eliminated). Also see the earlier
 tool-calling protocol gotchas (tool-call-id linking, string-encoded
 arguments) if swapping backends again.
 
+**Schema changes go through an additive migration before deploy.** There is no
+migration framework: `schema.sql` is applied wholesale by `seed_db.py --reset`,
+which drops everything. For Railway, `scripts/migrate_invoicing.py` (and the
+earlier `migrate_to_admin_schema.py`) add columns in place, idempotently. Run
+them **before** deploying code that reads the new columns.
+
 Run tests: `.venv/Scripts/python -m pytest tests/ -v` — hits the live DB
 directly, no mocking. Re-run `seed_db.py --reset` after, since the
 cancellation happy-path test actually cancels an order.
@@ -80,10 +90,15 @@ the actual logic: `order_tools.py` (status, cancellation-eligibility +
 confirmation-token issuance, cancel), `coupon_tools.py` (settlement offer,
 issuance, redemption — reused by Gold SIP's early-exit payout),
 `gold_sip_tools.py` (plan tiers, subscription lifecycle), `product_tools.py`
-(catalog browse/recommend), `purchase_tools.py` (place orders, optionally
-applying a coupon/SIP discount), `knowledge_tools.py` (Postgres full-text
-search over policy docs), `market_tools.py` (live gold/silver rates),
-`formatting.py` (INR currency formatting — see Guardrails below).
+(catalog browse/recommend, filtered by occasion/style as well as
+category/metal/stone), `purchase_tools.py` (place orders — which now create them
+awaiting payment — plus `confirm_payment`), `billing.py` (decomposes a
+GST-inclusive price into metal/making/stone/GST lines and renders the tax
+invoice), `address_tools.py` (saved delivery addresses, with Indian PIN/phone/
+state validation), `design_tools.py` (custom design briefs and their indicative
+estimates), `knowledge_tools.py` (Postgres full-text search over policy docs),
+`market_tools.py` (live gold/silver rates), `formatting.py` (INR currency and
+address formatting — see Guardrails below).
 `src/api/main.py` is the thin FastAPI surface the web app talks to
 (`POST /conversations`, `POST /chat`); `src/api/auth.py` wires in self-hosted
 SuperTokens for real OTP-over-email login (see Local setup below).
@@ -102,6 +117,27 @@ SuperTokens for real OTP-over-email login (see Local setup below).
   cannot be replayed in another (see `JOURNAL.md`, 2026-08-15).
 - **Every tool call is audit-logged** to `tool_call_log` (name, args, result)
   by the orchestrator, not by individual tools.
+- **The model is never asked what today's date is.** `prompt_for()` injects it
+  per call, admin date-range tools take a relative `period` instead of computed
+  dates, and `_guard_model_supplied_range` rejects any explicit range lying
+  entirely outside the orders table. Asked "any cancellations this month", the
+  model with no clock in context answered about October 2023 — its training
+  cutoff — and reported the empty result as fact. See `JOURNAL.md`, 2026-08-16.
+- **The catalogue price is the amount payable, and the invoice decomposes it
+  backwards.** GST (3% goods / 5% making) is *inside* `price_cents`, never added
+  on top, so `total_amount_cents` and every revenue figure are unaffected by
+  invoicing existing. `src/tools/billing.py` solves for the metal value with
+  exact rationals, floors each component, and puts the few paise left over in a
+  visible rounding-adjustment row — then asserts the column sums to the price
+  before returning. The per-gram rate shown is *implied* (metal value ÷ weight),
+  never fetched from a market feed, or the same order would bill differently on
+  two consecutive turns.
+- **Placing an order is not paying for it.** `place_order` writes
+  `payment_status = 'PENDING'`; `confirm_payment` moves it, and cash-on-delivery
+  deliberately does *not* (the money is collected later, by someone else).
+  Because of this, settling a cancelled order re-checks payment first — without
+  that, cancelling an unpaid order would issue store credit worth 110% of money
+  never collected. See `JOURNAL.md`, 2026-08-16 (advisor).
 - **Currency arithmetic never happens in the model.** Every tool response
   with a `*_cents` field also returns a matching `*_display` field
   (`src/tools/formatting.py`), already correctly converted to ₹ with Indian

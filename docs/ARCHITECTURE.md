@@ -1,4 +1,4 @@
-# TP Jewellers Chatbot — System Architecture
+# DP Jewellers Chatbot — System Architecture
 
 > **As-built, 2026-08-16.** This started as a pre-implementation design doc; it
 > has been rewritten to describe what actually exists. The core "tool-calling
@@ -11,7 +11,7 @@
 
 ## The core design decision: tool-calling agent, not RAG-first
 
-A customer asking "where is my order TPJ-123456" or "cancel my order" is not
+A customer asking "where is my order DPJ-123456" or "cancel my order" is not
 asking a knowledge-retrieval question — they're asking for a live, deterministic
 lookup or action against transactional data. Vector similarity search over
 embedded text would retrieve *semantically similar text about orders in
@@ -68,7 +68,7 @@ would have owned.
 
 | Query type | Example | Handled by |
 |---|---|---|
-| Transactional lookup | "Where is TPJ-123456?" | `get_order_status` — direct DB read |
+| Transactional lookup | "Where is DPJ-123456?" | `get_order_status` — direct DB read |
 | Transactional action | "Cancel my order" | `check_cancellation_eligibility` → confirm → `cancel_order` |
 | Account-scoped data | "What have I ordered?" | `list_customer_orders`, scoped to the session's customer_id |
 | Business-wide analytics | "How were sales last month?" | `admin_sales_summary` — staff only |
@@ -224,7 +224,7 @@ whom, with before/after state and a mandatory reason.
 ## Folder layout
 
 ```
-tpjewellers-chatbot/
+dpjewellers-chatbot/
 ├── docs/ARCHITECTURE.md      (this file)
 ├── JOURNAL.md                as-built history and reasoning — read this
 ├── src/

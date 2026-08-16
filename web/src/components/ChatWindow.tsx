@@ -79,7 +79,7 @@ export default function ChatWindow({ conversationId, customerName, mode }: Props
       <header className="flex items-center justify-between border-b border-[var(--color-border)] px-6 py-4">
         <div>
           <p className="text-xs tracking-[0.3em] text-[var(--color-gold)] uppercase">
-            TP Jewellers
+            DP Jewellers
           </p>
           <h1 className="font-display text-xl text-[var(--color-fg)]">
             {isAdmin ? "Staff Console" : "Concierge"}

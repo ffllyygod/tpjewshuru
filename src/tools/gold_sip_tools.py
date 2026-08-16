@@ -42,7 +42,7 @@ from src.tools.formatting import format_inr
 
 
 def _new_sip_code() -> str:
-    return f"TPJ-SIP-{secrets.token_urlsafe(9).replace('_', '').replace('-', '').upper()[:12]}"
+    return f"DPJ-SIP-{secrets.token_urlsafe(9).replace('_', '').replace('-', '').upper()[:12]}"
 
 
 def list_gold_sip_plans() -> dict:

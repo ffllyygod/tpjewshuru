@@ -1,5 +1,5 @@
 """
-Seed the TP Jewellers dev database with realistic fake data.
+Seed the DP Jewellers dev database with realistic fake data.
 
 Usage:
     python scripts/seed_db.py           # seed (fails if schema not applied)
@@ -23,6 +23,11 @@ from psycopg.types.json import Json
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = ROOT / "src" / "db" / "schema.sql"
+
+# backfill_invoice_attributes builds its figures with the same decompose_price
+# the invoice tool uses, so seeded data is self-consistent with the bill by
+# construction rather than by a comment asking someone to keep them in step.
+sys.path.insert(0, str(ROOT))
 
 fake = Faker()
 Faker.seed(42)
@@ -66,11 +71,14 @@ def seed_products(conn: psycopg.Connection, count: int = 24) -> list[dict]:
             name = f"{metal.replace('_', ' ').title()} {base_name}" + (
                 f" with {stone.title()}" if stone != "none" else ""
             )
-            sku = f"TPJ-{category[:3].upper()}-{1000 + i}"
+            sku = f"DPJ-{category[:3].upper()}-{1000 + i}"
             # price_cents stores the smallest currency unit — paise, since this
-            # store prices in INR. Range is realistic Indian retail jewellery
-            # pricing (₹15,000 - ₹8,00,000), not a relabeled USD range.
-            price_cents = random.randint(1_500_000, 80_000_000)  # ₹15,000 - ₹8,00,000
+            # store prices in INR. Derived from the piece's weight, purity,
+            # making charge and stones rather than drawn from a flat range, so
+            # the price and the invoice breakdown are the same arithmetic.
+            spec = _jewellery_spec(category, metal, stone)
+            price_cents = spec["price_cents"]
+            occasions, style = _occasion_and_style(name)
 
             sizes_available = RING_SIZES if has_sizes else None
             if has_sizes:
@@ -82,8 +90,10 @@ def seed_products(conn: psycopg.Connection, count: int = 24) -> list[dict]:
                 """
                 INSERT INTO products
                     (sku, name, category, description, price_cents, metal, stone,
-                     sizes_available, stock_by_size)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     sizes_available, stock_by_size,
+                     net_weight_grams, purity_karat, making_charge_percent,
+                     stone_value_cents, occasion, style)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, sku, name, category, price_cents
                 """,
                 (
@@ -96,6 +106,12 @@ def seed_products(conn: psycopg.Connection, count: int = 24) -> list[dict]:
                     stone,
                     Json(sizes_available) if sizes_available is not None else None,
                     Json(stock_by_size),
+                    spec["net_weight_grams"],
+                    spec["purity_karat"],
+                    spec["making_charge_percent"],
+                    spec["stone_value_cents"],
+                    occasions,
+                    style,
                 ),
             )
             row = cur.fetchone()
@@ -112,6 +128,82 @@ def seed_products(conn: psycopg.Connection, count: int = 24) -> list[dict]:
     conn.commit()
     print(f"Seeded {len(products)} products.")
     return products
+
+
+# (city, state, PIN prefix). Hand-written rather than Faker's postcode(),
+# because Faker will not make the PIN agree with the city it just gave you — and
+# a seeder that violates the PIN/state cross-check the address tool enforces
+# would be embarrassing the first time anyone looked.
+_INDIAN_CITIES = [
+    ("Bengaluru", "Karnataka", "5600"),
+    ("Mumbai", "Maharashtra", "4000"),
+    ("Chennai", "Tamil Nadu", "6000"),
+    ("Hyderabad", "Telangana", "5000"),
+    ("Pune", "Maharashtra", "4110"),
+    ("Kolkata", "West Bengal", "7000"),
+    ("Jaipur", "Rajasthan", "3020"),
+    ("Kochi", "Kerala", "6820"),
+    ("Ahmedabad", "Gujarat", "3800"),
+    ("New Delhi", "Delhi", "1100"),
+]
+
+_STREETS = [
+    "MG Road", "Residency Road", "Brigade Road", "Nehru Nagar", "Gandhi Marg",
+    "Church Street", "Lake View Road", "Temple Street", "Station Road", "Park Avenue",
+]
+
+
+def _indian_phone() -> str:
+    """10 digits starting 6-9 — the shape the address tool validates against."""
+    return f"{random.choice('6789')}{random.randint(0, 999999999):09d}"
+
+
+def _indian_address(recipient_name: str | None = None) -> dict:
+    city, state, prefix = random.choice(_INDIAN_CITIES)
+    address = {
+        "line1": f"{random.randint(1, 400)} {random.choice(_STREETS)}",
+        "line2": None,
+        "city": city,
+        "state": state,
+        "postal_code": f"{prefix}{random.randint(1, 99):02d}",
+        "country": "IN",
+        "phone": _indian_phone(),
+    }
+    if recipient_name:
+        address["recipient_name"] = recipient_name
+    return address
+
+
+def seed_customer_addresses(conn: psycopg.Connection, customers: list[dict]) -> None:
+    """One saved default address per customer.
+
+    Load-bearing for the test suite, not just the demo: place_order now requires
+    a delivery address, and every existing purchase test uses a seeded customer.
+    Without this they would all fail on address_required.
+    """
+    with conn.cursor() as cur:
+        for customer in customers:
+            cur.execute(
+                "SELECT 1 FROM customer_addresses WHERE customer_id = %s AND is_default",
+                (customer["id"],),
+            )
+            if cur.fetchone():
+                continue
+            addr = _indian_address(customer["name"])
+            cur.execute(
+                """
+                INSERT INTO customer_addresses
+                    (customer_id, label, recipient_name, phone, line1, city, state,
+                     postal_code, country, is_default)
+                VALUES (%s, 'Home', %s, %s, %s, %s, %s, %s, 'IN', true)
+                """,
+                (
+                    customer["id"], customer["name"], addr["phone"], addr["line1"],
+                    addr["city"], addr["state"], addr["postal_code"],
+                ),
+            )
+    conn.commit()
+    print(f"Seeded default delivery addresses for {len(customers)} customers.")
 
 
 def seed_customers(conn: psycopg.Connection, count: int = 10) -> list[dict]:
@@ -153,7 +245,7 @@ def seed_orders(
     with conn.cursor() as cur:
         for i in range(count):
             customer = random.choice(customers)
-            order_number = f"TPJ-{10000 + i}"
+            order_number = f"DPJ-{10000 + i}"
 
             # Force a spread of scenarios for the first few orders (deterministic
             # for manual testing); randomize the rest for volume.
@@ -205,14 +297,11 @@ def seed_orders(
                     shipped_at,
                     delivered_at,
                     total_cents,
-                    psycopg.types.json.Json(
-                        {
-                            "line1": fake.street_address(),
-                            "city": fake.city(),
-                            "postal_code": fake.postcode(),
-                            "country": "US",
-                        }
-                    ),
+                    # Indian addresses, not Faker's US default. This is an Indian
+                    # store pricing in rupees; a shipping address in Ohio with a
+                    # 5-digit ZIP reads as obviously synthetic on an invoice, and
+                    # fails the PIN validation the address tools enforce.
+                    psycopg.types.json.Json(_indian_address()),
                     "REFUNDED" if status == "CANCELLED" else "PAID",
                     *(_seed_resolution_reason("cancellation") if status == "CANCELLED" else (None, None)),
                     None, None, None,   # return reason/note/returned_at — no RETURNED fixtures
@@ -248,12 +337,12 @@ def seed_orders(
                 prev = step_status
 
     conn.commit()
-    print(f"Seeded {count} orders (order #TPJ-10000..TPJ-{10000 + count - 1}).")
-    print("  TPJ-10000: PLACED, 2h ago      -> cancellable")
-    print("  TPJ-10001: CONFIRMED, 10d ago  -> outside cancellation window")
-    print("  TPJ-10002: SHIPPED             -> not cancellable (status)")
-    print("  TPJ-10003: DELIVERED           -> not cancellable (status)")
-    print("  TPJ-10004: CANCELLED           -> already cancelled")
+    print(f"Seeded {count} orders (order #DPJ-10000..DPJ-{10000 + count - 1}).")
+    print("  DPJ-10000: PLACED, 2h ago      -> cancellable")
+    print("  DPJ-10001: CONFIRMED, 10d ago  -> outside cancellation window")
+    print("  DPJ-10002: SHIPPED             -> not cancellable (status)")
+    print("  DPJ-10003: DELIVERED           -> not cancellable (status)")
+    print("  DPJ-10004: CANCELLED           -> already cancelled")
 
 
 KNOWLEDGE_DOCS = [
@@ -474,7 +563,7 @@ def seed_gold_sip_plans(conn: psycopg.Connection) -> None:
 # ============================================================
 # Everything below runs AFTER the generators above and re-seeds the RNG at its
 # own start. That ordering is load-bearing: tests/test_tools.py and
-# tests/test_coupon_tools.py pin TPJ-10000..TPJ-10004 to exact statuses, and
+# tests/test_coupon_tools.py pin DPJ-10000..DPJ-10004 to exact statuses, and
 # those come out of seed_orders' RNG stream. Appending here (rather than
 # rewriting seed_orders) means the volume of history generated below can be
 # tuned freely without ever shifting the stream that produces those fixtures.
@@ -482,10 +571,10 @@ def seed_gold_sip_plans(conn: psycopg.Connection) -> None:
 HISTORY_SEED = 4242
 
 # Order numbers MUST NOT collide with runtime orders. purchase_tools mints
-# TPJ-{100000..999999} (6 digits) and the scenario orders are TPJ-1000x, so a
+# DPJ-{100000..999999} (6 digits) and the scenario orders are DPJ-1000x, so a
 # numeric history range would eventually collide. The H prefix is provably
 # disjoint from both, and instantly recognisable as seed data when debugging.
-HISTORY_ORDER_PREFIX = "TPJ-H"
+HISTORY_ORDER_PREFIX = "DPJ-H"
 
 # Indian retail jewellery calendar. Volume multiplier by month (1 = January).
 # This is the whole reason the admin reports are worth demoing: a flat random
@@ -519,8 +608,8 @@ INDIAN_CITIES = [
 ]
 
 ADMIN_USERS = [
-    ("Priya Nair", "admin@tpjewellers.com", "admin"),
-    ("Store Manager", "manager@tpjewellers.com", "admin"),
+    ("Priya Nair", "admin@dpjewellers.com", "admin"),
+    ("Store Manager", "manager@dpjewellers.com", "admin"),
 ]
 
 
@@ -552,8 +641,10 @@ def seed_extra_products(conn: psycopg.Connection, count: int = 26) -> list[dict]
             name = f"{metal.replace('_', ' ').title()} {base_name}" + (
                 f" with {stone.title()}" if stone != "none" else ""
             )
-            sku = f"TPJ-{category[:3].upper()}-{2000 + i}"
-            price_cents = random.randint(1_500_000, 80_000_000)
+            sku = f"DPJ-{category[:3].upper()}-{2000 + i}"
+            spec = _jewellery_spec(category, metal, stone)
+            price_cents = spec["price_cents"]
+            occasions, style = _occasion_and_style(name)
             # Margin varies by category so the margin report differentiates
             # rather than showing one flat percentage everywhere.
             cost_ratio = random.uniform(0.55, 0.75)
@@ -567,8 +658,10 @@ def seed_extra_products(conn: psycopg.Connection, count: int = 26) -> list[dict]
                 """
                 INSERT INTO products
                     (sku, name, category, description, price_cents, cost_price_cents,
-                     metal, stone, sizes_available, stock_by_size, low_stock_threshold)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     metal, stone, sizes_available, stock_by_size, low_stock_threshold,
+                     net_weight_grams, purity_karat, making_charge_percent,
+                     stone_value_cents, occasion, style)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, sku, name, category, price_cents
                 """,
                 (
@@ -577,6 +670,9 @@ def seed_extra_products(conn: psycopg.Connection, count: int = 26) -> list[dict]
                     price_cents, int(price_cents * cost_ratio), metal, stone,
                     Json(sizes_available) if sizes_available is not None else None,
                     Json(stock_by_size), random.choice([2, 2, 2, 5]),
+                    spec["net_weight_grams"], spec["purity_karat"],
+                    spec["making_charge_percent"], spec["stone_value_cents"],
+                    occasions, style,
                 ),
             )
             row = cur.fetchone()
@@ -586,7 +682,7 @@ def seed_extra_products(conn: psycopg.Connection, count: int = 26) -> list[dict]
                 "sizes_available": sizes_available,
             })
     conn.commit()
-    print(f"Seeded {len(products)} additional products (TPJ-*-2000+).")
+    print(f"Seeded {len(products)} additional products (DPJ-*-2000+).")
     return products
 
 
@@ -625,6 +721,212 @@ def backfill_cost_prices(conn: psycopg.Connection) -> None:
             )
     conn.commit()
     print(f"Backfilled cost prices for {len(rows)} products.")
+
+
+# Fixed seed-time metal rates, paise per gram. Deliberately NOT
+# market_tools.get_metal_rates: a network call in the seeder makes the fixture
+# non-reproducible, and a rate that moves would give the same product a
+# different weight on every reseed.
+_RATE_PER_GRAM = {
+    ("gold", 24): 1_085_000, ("gold", 22): 995_000, ("gold", 18): 814_000,
+    ("rose_gold", 18): 814_000, ("rose_gold", 14): 635_000,
+    ("silver", None): 12_800, ("platinum", None): 320_000,
+}
+
+# Plausible finished weights, grams, by category.
+#
+# These drive the PRICE, not the other way round — which is the opposite of how
+# this seeder used to work and the only ordering that produces a coherent
+# catalogue. Picking a price from one flat ₹15,000-₹8,00,000 range regardless of
+# metal gave ₹6.8 lakh silver bangles, and back-solving their weight at ₹128/g
+# gave 972 g. Both are nonsense, and the second is only a symptom of the first.
+#
+# Generating weight first and deriving the price through the same GST maths the
+# invoice uses means the catalogue, the bill and the implied per-gram rate are
+# all consistent by construction: silver comes out cheap because silver is
+# cheap, and a platinum ring costs what a platinum ring costs.
+_WEIGHT_RANGE_GRAMS = {
+    "ring": (2, 15), "pendant": (1, 8), "earring": (1.5, 10),
+    "bracelet": (5, 35), "bangle": (8, 60), "necklace": (8, 45),
+}
+
+# Stone value as a MULTIPLE of the metal value — not a fraction of the price,
+# which would be circular (the price is what we're deriving).
+_STONE_MULTIPLE = {
+    "diamond": (0.8, 3.0),
+    "ruby": (0.4, 1.5), "emerald": (0.4, 1.5), "sapphire": (0.4, 1.5),
+    "none": (0.0, 0.0),
+}
+
+# Making charges vary by how much handwork a category takes.
+_MAKING_RANGE = {
+    "ring": (10, 16), "pendant": (10, 16), "necklace": (8, 14),
+    "bangle": (8, 14), "earring": (10, 18), "bracelet": (10, 18),
+}
+
+# What each piece is actually FOR. Without this, "something for our anniversary"
+# is answered by the model guessing from product names, which is exactly the
+# kind of judgement the catalogue should be making instead.
+_OCCASION_BY_TEMPLATE = {
+    "Solitaire Ring": (["engagement", "wedding", "anniversary"], "classic"),
+    "Eternity Band": (["wedding", "anniversary"], "classic"),
+    "Halo Engagement Ring": (["engagement", "wedding"], "statement"),
+    "Tennis Necklace": (["wedding", "festive", "gifting"], "statement"),
+    "Pendant Chain": (["daily", "gifting", "birthday"], "minimal"),
+    "Stud Earrings": (["daily", "gifting", "birthday"], "minimal"),
+    "Drop Earrings": (["festive", "wedding", "gifting"], "contemporary"),
+    "Tennis Bracelet": (["anniversary", "gifting", "festive"], "contemporary"),
+    "Charm Bracelet": (["birthday", "gifting", "daily"], "contemporary"),
+    "Classic Bangle": (["festive", "wedding", "gifting"], "traditional"),
+    "Solitaire Pendant": (["anniversary", "gifting", "birthday"], "classic"),
+}
+
+ALL_OCCASIONS = ["wedding", "engagement", "anniversary", "birthday", "festive", "daily", "gifting"]
+
+
+def _jewellery_spec(category: str, metal: str, stone: str) -> dict:
+    """Generate one internally-consistent piece: weight, purity, making charge,
+    stone value, and the GST-inclusive price they add up to.
+
+    The price is computed FORWARD through exactly the identity
+    src/tools/billing.py solves backwards —
+
+        P = 1.03·(M + S) + 1.05·K,   K = M·r/100
+
+    — so decomposing the resulting price with these same attributes returns
+    this same metal value. The catalogue can't drift from the invoice because
+    they are the same arithmetic run in opposite directions.
+    """
+    if metal == "gold":
+        karat = random.choice([22, 18])
+    elif metal == "rose_gold":
+        karat = random.choice([18, 14])
+    else:
+        karat = None
+
+    lo, hi = _WEIGHT_RANGE_GRAMS.get(category, (2, 20))
+    weight = round(random.uniform(lo, hi), 3)
+    making = round(random.uniform(*_MAKING_RANGE.get(category, (10, 15))), 2)
+
+    metal_value = weight * _RATE_PER_GRAM[(metal, karat)]
+    stone_value = round(metal_value * random.uniform(*_STONE_MULTIPLE[stone]))
+    making_value = metal_value * making / 100
+    price_cents = round(1.03 * (metal_value + stone_value) + 1.05 * making_value)
+
+    return {
+        "price_cents": price_cents,
+        "net_weight_grams": weight,
+        "purity_karat": karat,
+        "making_charge_percent": making,
+        "stone_value_cents": stone_value,
+    }
+
+
+def _occasion_and_style(name: str) -> tuple[list[str], str]:
+    base = next((b for b in _OCCASION_BY_TEMPLATE if b in name), None)
+    return _OCCASION_BY_TEMPLATE.get(base, (["gifting"], "classic"))
+
+
+def backfill_invoice_attributes(conn: psycopg.Connection) -> None:
+    """Give invoice data to products whose price was fixed by hand.
+
+    The generated catalogue derives its price FROM these attributes
+    (`_jewellery_spec`), so it never lands here. This is for products created
+    the other way round — the hand-priced demo pieces in add_demo_user.py, and
+    anything added through the admin tools — where the price is already fixed
+    and the attributes have to be solved backwards out of it with the same
+    `billing.decompose_price` the invoice uses.
+    """
+    from src.tools.billing import decompose_price
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, name, category, metal, stone, price_cents
+            FROM products WHERE making_charge_percent IS NULL
+            """
+        )
+        rows = cur.fetchall()
+        no_weight = 0
+
+        for pid, name, category, metal, stone, price_cents in rows:
+            making = round(random.uniform(*_MAKING_RANGE.get(category, (10, 15))), 2)
+
+            if stone == "none":
+                stone_value = 0
+            else:
+                share = random.uniform(0.15, 0.35) if stone == "diamond" else random.uniform(0.10, 0.22)
+                stone_value = int(price_cents * share)
+
+            if metal in ("gold",):
+                karat = random.choice([22, 18])
+            elif metal == "rose_gold":
+                karat = random.choice([18, 14])
+            else:
+                karat = None
+
+            metal_value = decompose_price(
+                price_cents,
+                making_charge_percent=making,
+                stone_value_cents=stone_value,
+            )["metal_value_cents"]
+            weight = round(metal_value / _RATE_PER_GRAM[(metal, karat)], 3)
+            # A price fixed by hand may imply an impossible weight (a ₹1.8L
+            # silver bangle would be 972 g). Record no weight rather than an
+            # absurd one — the invoice says "weight not on record", which is
+            # true, and every money line on it is still exactly right.
+            if weight > _WEIGHT_RANGE_GRAMS.get(category, (0, 100))[1] * 1.5:
+                weight = None
+
+            base = next((b for b in _OCCASION_BY_TEMPLATE if b in name), None)
+            occasions, style = _OCCASION_BY_TEMPLATE.get(base, (["gifting"], "classic"))
+
+            cur.execute(
+                """
+                UPDATE products
+                SET making_charge_percent = %s, stone_value_cents = %s,
+                    purity_karat = %s, net_weight_grams = %s,
+                    occasion = %s, style = %s
+                WHERE id = %s
+                """,
+                (making, stone_value, karat, weight, occasions, style, pid),
+            )
+            if weight is None:
+                no_weight += 1
+    conn.commit()
+    print(
+        f"Backfilled invoice + occasion attributes for {len(rows)} products "
+        f"({no_weight} left without a weight — price implies an implausible one)."
+    )
+
+
+def seed_occasion_coverage(conn: psycopg.Connection) -> None:
+    """Guarantee every occasion returns something.
+
+    Same defensive move as seed_inventory_edge_cases: on an unlucky RNG draw
+    "something for a birthday" could come back empty, which reads as a broken
+    assistant rather than a catalogue that happens not to stock one.
+    """
+    with conn.cursor() as cur:
+        for occasion in ALL_OCCASIONS:
+            cur.execute(
+                "SELECT count(*) FROM products WHERE active AND %s = ANY(occasion)", (occasion,)
+            )
+            if cur.fetchone()[0] >= 3:
+                continue
+            cur.execute(
+                """
+                UPDATE products SET occasion = array_append(occasion, %s)
+                WHERE id IN (
+                    SELECT id FROM products
+                    WHERE active AND NOT (%s = ANY(occasion))
+                    ORDER BY price_cents LIMIT 3
+                )
+                """,
+                (occasion, occasion),
+            )
+    conn.commit()
+    print(f"Ensured every occasion ({', '.join(ALL_OCCASIONS)}) has stock.")
 
 
 def seed_final_sale_products(conn: psycopg.Connection) -> None:
@@ -831,6 +1133,9 @@ def main() -> None:
         apply_schema(conn, reset=args.reset)
         products = seed_products(conn)
         customers = seed_customers(conn)
+        # Before seed_orders for the same reason resolution_reasons is: an order
+        # now needs somewhere to ship to.
+        seed_customer_addresses(conn, customers)
         # Before seed_orders, not after: a cancelled order carries an FK to this
         # table, so the pick-list has to exist before any order is written.
         seed_resolution_reasons(conn)
@@ -844,8 +1149,12 @@ def main() -> None:
         seed_admin_users(conn)
         extra_products = seed_extra_products(conn)
         extra_customers = seed_extra_customers(conn)
+        seed_customer_addresses(conn, extra_customers)
         seed_history_orders(conn, customers + extra_customers, products + extra_products)
         backfill_cost_prices(conn)
+        # After every product exists, so nothing is left without invoice data.
+        backfill_invoice_attributes(conn)
+        seed_occasion_coverage(conn)
         seed_final_sale_products(conn)
         seed_inventory_edge_cases(conn)
 

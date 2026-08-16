@@ -20,8 +20,8 @@ No existing row is modified except `products.cost_price_cents` where it is NULL,
 which is backfilled metadata — without it, margin reporting says "cost data
 incomplete" for the whole real catalogue.
 
-Order numbers use the `TPJ-H` prefix, which cannot collide with the
-`TPJ-{100000..999999}` that `purchase_tools._new_order_number` mints, so a real
+Order numbers use the `DPJ-H` prefix, which cannot collide with the
+`DPJ-{100000..999999}` that `purchase_tools._new_order_number` mints, so a real
 order placed later can never clash with a seeded one.
 
     python scripts/seed_analytics_history.py --url ...
@@ -61,11 +61,11 @@ def existing_history_count(conn: psycopg.Connection) -> int:
 
 
 def synthetic_sku_conflicts(conn: psycopg.Connection) -> list[str]:
-    """The extra-product SKUs are fixed (TPJ-XXX-2000+), so a partial previous
+    """The extra-product SKUs are fixed (DPJ-XXX-2000+), so a partial previous
     run would collide on the UNIQUE index mid-way and abort with rows already
     written. Check up front instead."""
     with conn.cursor() as cur:
-        cur.execute("SELECT sku FROM products WHERE sku ~ '^TPJ-[A-Z]{3}-2[0-9]{3}$' ORDER BY sku")
+        cur.execute("SELECT sku FROM products WHERE sku ~ '^DPJ-[A-Z]{3}-2[0-9]{3}$' ORDER BY sku")
         return [r[0] for r in cur.fetchall()]
 
 

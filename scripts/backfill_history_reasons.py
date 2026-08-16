@@ -6,11 +6,11 @@ for a real customer's order — nobody asked them why, so nothing should be put 
 their mouth. But it leaves the "why are people cancelling" report showing a
 single meaningless row.
 
-The seeded `TPJ-H` history orders are a different case: they are synthetic, and
+The seeded `DPJ-H` history orders are a different case: they are synthetic, and
 their statuses were generated in the first place. Giving them a plausible reason
 distribution invents nothing that wasn't already invented.
 
-So this touches ONLY orders whose number starts with `TPJ-H`, and only those
+So this touches ONLY orders whose number starts with `DPJ-H`, and only those
 still sitting on the legacy `unspecified` codes. Real orders keep "Not
 recorded", and it verifies that at the end.
 
@@ -101,7 +101,7 @@ def main() -> None:
             return
         conn.commit()
 
-        # The whole point of the TPJ-H filter: a real customer's order must not
+        # The whole point of the DPJ-H filter: a real customer's order must not
         # have acquired a reason nobody gave.
         cur.execute(
             """

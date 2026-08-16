@@ -33,7 +33,7 @@ from src.db.connection import get_conn
 
 init_auth()
 
-app = FastAPI(title="TP Jewellers Chatbot")
+app = FastAPI(title="DP Jewellers Chatbot")
 
 app.add_middleware(get_middleware())
 

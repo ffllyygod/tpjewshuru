@@ -74,9 +74,9 @@ VIP_LIFETIME_CENTS = 20_000_000  # ₹2,00,000
 DORMANT_DAYS = 180
 
 _RUPEE = re.compile(r"₹\s?[\d,]+(?:\.\d{1,2})?")
-_ORDER_NO = re.compile(r"TPJ-(?:H?\d{5,6}|[A-Z0-9]{6})\b")
-_SKU = re.compile(r"TPJ-[A-Z]{3}-[A-Z0-9]{4,5}\b")
-_CODE = re.compile(r"TPJ-(?:CPN|SIP)-[A-Z0-9]+\b")
+_ORDER_NO = re.compile(r"DPJ-(?:H?\d{5,6}|[A-Z0-9]{6})\b")
+_SKU = re.compile(r"DPJ-[A-Z]{3}-[A-Z0-9]{4,5}\b")
+_CODE = re.compile(r"DPJ-(?:CPN|SIP)-[A-Z0-9]+\b")
 
 
 def _eligible_customer_sql(alias: str = "cu") -> str:
@@ -392,7 +392,7 @@ def _is_grounded(message: str, facts: dict) -> tuple[bool, str | None]:
     return True, None
 
 
-DRAFT_SYSTEM_PROMPT = """You write short, warm outreach messages for TP Jewellers, \
+DRAFT_SYSTEM_PROMPT = """You write short, warm outreach messages for DP Jewellers, \
 an Indian jewellery retailer, to send to an existing customer.
 
 You are given a set of FACTS. Write 2-3 sentences based ONLY on those facts.

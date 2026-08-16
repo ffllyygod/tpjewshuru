@@ -23,7 +23,7 @@ export default function ModeChooser({ name, onChoose }: Props) {
       <div className="w-full max-w-sm">
         <div className="mb-8 text-center">
           <p className="mb-2 text-xs tracking-[0.3em] text-[var(--color-gold)] uppercase">
-            TP Jewellers
+            DP Jewellers
           </p>
           <h1 className="font-display text-3xl text-[var(--color-fg)]">
             {name ? `Welcome, ${name.split(" ")[0]}` : "Welcome"}

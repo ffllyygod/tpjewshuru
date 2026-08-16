@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from psycopg.rows import dict_row
 
+from tests.conftest import give_default_address
 from src.db.connection import get_conn
 from src.tools import coupon_tools, order_tools, purchase_tools
 
@@ -42,6 +43,7 @@ def customer() -> str:
         )
         cid = str(cur.fetchone()[0])
         conn.commit()
+    give_default_address(cid)   # place_order won't ship to nowhere
     return cid
 
 
@@ -55,7 +57,7 @@ def conversation(customer) -> str:
 
 
 def _make_product(returnable: bool = True, sized: bool = True, stock: int = 5) -> dict:
-    sku = f"TPJ-RET-{uuid.uuid4().hex[:6].upper()}"
+    sku = f"DPJ-RET-{uuid.uuid4().hex[:6].upper()}"
     stock_by_size = {"7": stock} if sized else {"_default": stock}
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -76,7 +78,7 @@ def _make_order(customer_id: str, product: dict, status: str = "DELIVERED", deli
     """An order in a given state, with a line item, without going through
     place_order — so stock is untouched and the restock tests start from a known
     baseline."""
-    number = f"TPJ-R{uuid.uuid4().hex[:6].upper()}"
+    number = f"DPJ-R{uuid.uuid4().hex[:6].upper()}"
     delivered_at = datetime.now(timezone.utc) - timedelta(days=delivered_days_ago)
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(

@@ -14,8 +14,8 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "TP Jewellers — Concierge",
-  description: "AI shopping and support concierge for TP Jewellers.",
+  title: "DP Jewellers — Concierge",
+  description: "AI shopping and support concierge for DP Jewellers.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

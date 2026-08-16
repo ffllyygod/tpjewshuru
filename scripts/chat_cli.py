@@ -2,7 +2,7 @@
 
     python scripts/chat_cli.py                          # anonymous
     python scripts/chat_cli.py arun@shurutech.com       # as that customer
-    python scripts/chat_cli.py admin@tpjewellers.com --admin   # staff console
+    python scripts/chat_cli.py admin@dpjewellers.com --admin   # staff console
 
 This talks to the orchestrator **directly**, not over HTTP. That is deliberate:
 real login is passwordless OTP-over-email, so an HTTP client would need to read

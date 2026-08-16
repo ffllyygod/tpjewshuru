@@ -26,6 +26,11 @@ export default defineRailway(() => {
     },
   });
 
+  // Deliberately still "tpjewellers-chatbot" after the DP Jewellers rebrand.
+  // This string is the project's IDENTITY to Railway, not a label: changing it
+  // makes the next apply target a different project and orphan the live one,
+  // Postgres volume and all. Rename the project in the Railway dashboard (which
+  // keeps its resources), then change this to match.
   return project("tpjewellers-chatbot", {
     resources: [postgres, api],
   });

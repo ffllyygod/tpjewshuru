@@ -4,7 +4,7 @@ module holds.
 Everywhere else in src/tools/, a function takes `customer_id` as its scope and
 re-checks it in SQL — "look up someone else's order" is a capability that
 doesn't exist. These functions are the exception: they read across all
-customers, by design, for TP Jewellers staff.
+customers, by design, for DP Jewellers staff.
 
 Two rules keep that from leaking back into the customer path:
 
@@ -67,6 +67,54 @@ def _parse_date(value: str, field: str) -> datetime:
         raise ValueError(f"{field} must be a date in YYYY-MM-DD format, got '{value}'.") from None
 
 
+def _order_data_window() -> tuple[datetime, datetime] | None:
+    """The (earliest, latest) order timestamp on record, or None on an empty
+    table. One indexed aggregate; cheap enough to run per date-filtered query."""
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT MIN(placed_at) AS lo, MAX(placed_at) AS hi FROM orders")
+        row = cur.fetchone()
+    if not row or not row["lo"]:
+        return None
+    return row["lo"], row["hi"]
+
+
+def _guard_model_supplied_range(start: datetime | None, end: datetime | None) -> None:
+    """Reject an explicit date range that cannot possibly contain data.
+
+    This is the guard that does NOT depend on the model reading its prompt.
+    Live testing: asked "any cancellations this month", the model — with no
+    clock in context — filled in October 2023, the world as of its training
+    cutoff, and then reported the resulting empty result as fact: "no
+    cancellations". Telling it today's date (see system_prompt) fixes the
+    common case; this catches it anyway when the prompt doesn't take.
+
+    A range lying entirely outside the orders table is never a real question a
+    staff member asked. Failing loudly with the real window AND today's date
+    gives the model everything it needs to correct itself on the next call,
+    which an empty result never does. Same doctrine as _parse_date and the
+    bad_status check: a missing number is recoverable, a confidently wrong one
+    is not.
+    """
+    window = _order_data_window()
+    if window is None:
+        return  # Empty table: nothing to be out of range of.
+    lo, hi = window
+    if (start is not None and start > hi) or (end is not None and end <= lo):
+        lo_str = start.strftime("%d %b %Y") if start else None
+        hi_str = (end - timedelta(days=1)).strftime("%d %b %Y") if end else None
+        if lo_str and hi_str:
+            asked = f"{lo_str} – {hi_str}"
+        else:
+            asked = f"from {lo_str}" if lo_str else f"up to {hi_str}"
+        raise ValueError(
+            f"The date range you asked for ({asked}) is entirely outside the period "
+            f"orders exist for ({lo.strftime('%d %b %Y')} – {hi.strftime('%d %b %Y')}). "
+            f"Today's date is {datetime.now(timezone.utc).strftime('%d %B %Y')} — do not work the "
+            "current date out yourself. Re-ask using a relative period ('today', 'week', 'month', "
+            "'quarter', 'year', 'last_month', 'last_12_months') instead of explicit dates."
+        )
+
+
 def _resolve_period(period: str, start_date: str | None, end_date: str | None) -> tuple[datetime, datetime, str]:
     """Return (start, end, human label). Dates are pre-formatted here so the
     model never formats an Indian date itself — same principle as the currency
@@ -84,6 +132,9 @@ def _resolve_period(period: str, start_date: str | None, end_date: str | None) -
             raise ValueError(
                 f"end_date ({end_date}) must be on or after start_date ({start_date})."
             )
+        # Only the custom branch needs this. The relative periods are computed
+        # from the server clock and cannot land in the wrong year.
+        _guard_model_supplied_range(start, end)
     elif period == "last_month":
         first_of_this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         end = first_of_this_month
@@ -511,6 +562,7 @@ def admin_find_orders(
     actor_customer_id: str,
     status: str | None = None,
     customer_email: str | None = None,
+    period: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
     limit: int = 25,
@@ -519,6 +571,21 @@ def admin_find_orders(
     list_customer_orders."""
     limit = max(1, min(int(limit or 25), MAX_ROWS))
     clauses, params = [], []
+    period_label = None
+    # `period` exists so "cancellations this month" never requires the model to
+    # invent a date range. It resolves through the same _resolve_period the
+    # reporting tools use, so a period means the same thing everywhere.
+    if period:
+        try:
+            p_start, p_end, period_label = _resolve_period(period, start_date, end_date)
+        except ValueError as e:
+            return {"error": "bad_period", "message": str(e)}
+        clauses.append("o.placed_at >= %s")
+        params.append(p_start)
+        clauses.append("o.placed_at < %s")
+        params.append(p_end)
+        # Consumed by _resolve_period already; don't also apply them raw below.
+        start_date = end_date = None
     if status:
         # Validated here rather than letting Postgres reject the enum cast — that
         # surfaces to the model as an opaque tool_failed it can't correct from.
@@ -533,12 +600,19 @@ def admin_find_orders(
         clauses.append("cu.email ILIKE %s")
         params.append(f"%{customer_email}%")
     try:
-        if start_date:
+        raw_start = _parse_date(start_date, "start_date") if start_date else None
+        raw_end = _parse_date(end_date, "end_date") + timedelta(days=1) if end_date else None
+        # Same guard as the custom period branch, because dates reach this tool
+        # without going through _resolve_period at all. An open-ended range is
+        # bounded by the data window so a lone bogus start_date is still caught.
+        if raw_start or raw_end:
+            _guard_model_supplied_range(raw_start, raw_end)
+        if raw_start:
             clauses.append("o.placed_at >= %s")
-            params.append(_parse_date(start_date, "start_date"))
-        if end_date:
+            params.append(raw_start)
+        if raw_end:
             clauses.append("o.placed_at < %s")
-            params.append(_parse_date(end_date, "end_date") + timedelta(days=1))
+            params.append(raw_end)
     except ValueError as e:
         return {"error": "bad_date", "message": str(e)}
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -582,6 +656,9 @@ def admin_find_orders(
         "row_count": len(out),
         "truncated": len(out) >= limit,
         "rows_total_display": total_display,
+        # Returned so the model quotes the range it actually searched instead of
+        # narrating one it assumed. An empty result is only meaningful with it.
+        "period_label": period_label,
         "note": "rows_total covers only the rows returned, which may be capped by `limit`.",
     }
 
@@ -1238,7 +1315,7 @@ def admin_preview_stock_adjustment(
         if not product:
             return {
                 "error": "not_found",
-                "message": f"No product with SKU '{sku}'. SKUs look like TPJ-RIN-1010 — find it with admin_inventory_status.",
+                "message": f"No product with SKU '{sku}'. SKUs look like DPJ-RIN-1010 — find it with admin_inventory_status.",
             }
         stock = dict(product["stock_by_size"] or {})
         key, err = _resolve_size(stock, size)

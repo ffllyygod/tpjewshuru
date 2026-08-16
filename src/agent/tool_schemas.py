@@ -25,7 +25,7 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "order_number": {"type": "string", "description": "e.g. TPJ-10001"},
+                "order_number": {"type": "string", "description": "e.g. DPJ-10001"},
             },
             "required": ["order_number"],
         },
@@ -192,8 +192,8 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "code": {"type": "string", "description": "The coupon code, e.g. TPJ-CPN-XXXXXXXXXXXX"},
-                "order_number": {"type": "string", "description": "The order's order_number, e.g. TPJ-793859 — this is NOT a product SKU (e.g. TPJ-RIN-1010 is a SKU, not an order_number)."},
+                "code": {"type": "string", "description": "The coupon code, e.g. DPJ-CPN-XXXXXXXXXXXX"},
+                "order_number": {"type": "string", "description": "The order's order_number, e.g. DPJ-793859 — this is NOT a product SKU (e.g. DPJ-RIN-1010 is a SKU, not an order_number)."},
             },
             "required": ["code", "order_number"],
         },
@@ -203,7 +203,10 @@ TOOLS = [
         "description": (
             "Place a new order for a product. Confirm the product, size (if applicable), and quantity back "
             "to the customer before calling this. Optionally applies a coupon code OR a matured Gold SIP "
-            "code at the same time (not both — an order can only carry one discount source)."
+            "code at the same time (not both — an order can only carry one discount source). "
+            "This does NOT pay for the order — it is created awaiting payment. After it succeeds, call "
+            "generate_invoice and then ask which payment method they'd like. Never tell the customer "
+            "their order is paid at this step."
         ),
         "input_schema": {
             "type": "object",
@@ -213,9 +216,151 @@ TOOLS = [
                 "size": {"type": "string", "description": "Required for sized items (e.g. rings)."},
                 "coupon_code": {"type": "string", "description": "Optional — apply an existing coupon to this order."},
                 "gold_sip_code": {"type": "string", "description": "Optional — apply a matured Gold SIP subscription's balance to this order."},
+                "address_id": {
+                    "type": "string",
+                    "description": (
+                        "The address_id from get_my_addresses that the customer confirmed. Omit only if "
+                        "they agreed to use their default — the tool reports which one it used, and you "
+                        "must state that back to them."
+                    ),
+                },
             },
             "required": ["sku"],
         },
+    },
+    {
+        "name": "get_my_addresses",
+        "description": (
+            "The customer's saved delivery addresses. Call this BEFORE place_order so you can offer one "
+            "to confirm rather than making them re-type it. Each result has a 'formatted' field — read "
+            "that back verbatim; never reassemble an address from its parts yourself. If it returns "
+            "none, collect a new one with save_address."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "save_address",
+        "description": (
+            "Save a delivery address for the customer. Pass what they SAID, unchanged — do not expand "
+            "abbreviations, do not correct a PIN code, do not convert a state code to its full name, do "
+            "not fill in a field they didn't give you. This tool validates and normalises all of that, "
+            "and it checks things you cannot (a PIN that belongs to a different state, for one). If it "
+            "returns an error, tell the customer exactly what it said and ask again."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "recipient_name": {"type": "string", "description": "Who the parcel is addressed to — often the customer, but a gift may go to someone else."},
+                "phone": {"type": "string", "description": "10-digit Indian mobile for delivery. '+91' and spaces are fine."},
+                "line1": {"type": "string", "description": "House/flat number and street."},
+                "line2": {"type": "string", "description": "Optional — landmark, area, apartment name."},
+                "city": {"type": "string"},
+                "state": {"type": "string", "description": "Indian state or union territory. A two-letter code is fine — this tool canonicalises it."},
+                "postal_code": {"type": "string", "description": "6-digit Indian PIN code, e.g. 560025."},
+                "label": {"type": "string", "description": "Optional — the customer's own word for it, e.g. 'Home', 'Office'."},
+                "confirm_mismatch": {
+                    "type": "boolean",
+                    "description": (
+                        "Only set true after the customer has explicitly confirmed a PIN/state "
+                        "combination this tool already flagged as inconsistent."
+                    ),
+                },
+            },
+            "required": ["recipient_name", "phone", "line1", "city", "state", "postal_code"],
+        },
+    },
+    {
+        "name": "generate_invoice",
+        "description": (
+            "The full GST tax invoice for one of the customer's orders — the metal / making-charge / "
+            "stone / GST breakdown and what's payable. Call this immediately after place_order, and any "
+            "time they ask for a bill, receipt, or how a price is made up. CRITICAL: the result has an "
+            "'invoice_markdown' field that is ALREADY a formatted table. Output it VERBATIM. Do not "
+            "retype the figures, do not re-total the rows, do not reorder or 'tidy' it, and do not "
+            "restate the total in prose underneath. One sentence before and after it is fine."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order_number": {"type": "string", "description": "e.g. DPJ-793859 — NOT a product SKU."},
+            },
+            "required": ["order_number"],
+        },
+    },
+    {
+        "name": "confirm_payment",
+        "description": (
+            "Record payment for an order awaiting it. Call this ONLY after you have shown the invoice, "
+            "asked which method they want, and they have named one in a SEPARATE message. Never call it "
+            "speculatively, never to check whether an order is paid (use get_order_status for that), and "
+            "never on your own initiative. Cash on delivery does NOT mark an order paid — report what "
+            "the tool returns, not what you expected."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order_number": {"type": "string"},
+                "payment_method": {
+                    "type": "string",
+                    "enum": ["UPI", "CARD", "NETBANKING", "COD"],
+                    "description": "Exactly what the customer chose. Do not pick one for them.",
+                },
+            },
+            "required": ["order_number", "payment_method"],
+        },
+    },
+    {
+        "name": "estimate_custom_design",
+        "description": (
+            "An INDICATIVE price range for a custom piece, based on a catalogue piece as reference. Use "
+            "when a customer likes something but wants it different — another metal or karat, another "
+            "stone, a different weight, an engraving, or a size that isn't stocked. Pass reference_sku "
+            "verbatim from a search result, and only the attributes they actually asked to change. "
+            "Give them the RANGE and say it is indicative, never a firm price. If it returns "
+            "estimable=false, carry on with the brief and quote nothing at all — do not invent a figure."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reference_sku": {"type": "string", "description": "The catalogue piece they're working from."},
+                "metal": {"type": "string", "enum": ["gold", "silver", "platinum", "rose_gold"]},
+                "purity_karat": {"type": "integer", "enum": [24, 22, 18, 14], "description": "Gold only."},
+                "stone": {"type": "string", "enum": ["diamond", "ruby", "emerald", "sapphire", "none"]},
+                "net_weight_grams": {"type": "number", "description": "Only if they asked for a particular weight."},
+                "size": {"type": "string"},
+                "engraving_text": {"type": "string", "description": "Max 30 characters."},
+            },
+        },
+    },
+    {
+        "name": "submit_design_request",
+        "description": (
+            "File the custom design brief for a jeweller to price and follow up on. State the WHOLE spec "
+            "back to the customer and get their explicit agreement first — this is a commitment, like "
+            "starting a Gold SIP. Tell them engraved and custom-sized pieces are final sale BEFORE they "
+            "confirm. This does not order or charge anything, and there is no way to turn it into an "
+            "order — a jeweller takes it from here."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reference_sku": {"type": "string"},
+                "metal": {"type": "string", "enum": ["gold", "silver", "platinum", "rose_gold"]},
+                "purity_karat": {"type": "integer", "enum": [24, 22, 18, 14]},
+                "stone": {"type": "string", "enum": ["diamond", "ruby", "emerald", "sapphire", "none"]},
+                "net_weight_grams": {"type": "number"},
+                "size": {"type": "string"},
+                "engraving_text": {"type": "string"},
+                "occasion": {"type": "string", "description": "What the piece is for, in their words."},
+                "budget_max_rupees": {"type": "number", "description": "Only if they named one."},
+                "notes": {"type": "string", "description": "Anything else they said about the design, in their own words."},
+            },
+        },
+    },
+    {
+        "name": "get_my_design_requests",
+        "description": "The customer's own custom design requests and their status. Use if they ask what happened to a design they asked about.",
+        "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "set_marketing_preference",
@@ -235,13 +380,28 @@ TOOLS = [
     },
     {
         "name": "search_products",
-        "description": "Browse/recommend products from the catalog by category, metal, stone, and/or price range. Use this when the customer wants suggestions or is browsing (e.g. 'show me rings under ₹2,00,000', 'gold necklaces with diamonds').",
+        "description": (
+            "Browse/recommend products from the catalog by category, metal, stone, occasion, style "
+            "and/or price range. Use this when the customer wants suggestions or is browsing (e.g. "
+            "'show me rings under ₹2,00,000', 'gold necklaces with diamonds'). When they name an "
+            "occasion ('for our anniversary', 'a wedding gift'), pass it as `occasion` rather than "
+            "judging suitability from product names — the catalogue records what each piece is "
+            "actually for, and you don't."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "category": {"type": "string", "enum": ["ring", "necklace", "earring", "bracelet", "bangle", "pendant"]},
                 "metal": {"type": "string", "enum": ["gold", "silver", "platinum", "rose_gold"]},
                 "stone": {"type": "string", "enum": ["diamond", "ruby", "emerald", "sapphire", "none"]},
+                "occasion": {
+                    "type": "string",
+                    "enum": ["wedding", "engagement", "anniversary", "birthday", "festive", "daily", "gifting"],
+                },
+                "style": {
+                    "type": "string",
+                    "enum": ["classic", "contemporary", "minimal", "statement", "traditional"],
+                },
                 "min_price": {"type": "number", "description": "Minimum price in rupees."},
                 "max_price": {"type": "number", "description": "Maximum price in rupees."},
             },
@@ -288,7 +448,7 @@ TOOLS = [
         "description": "Record the next monthly installment payment for a Gold SIP subscription (demo: callable on-demand, no calendar-month wait). Auto-matures the subscription if this completes the tenure.",
         "input_schema": {
             "type": "object",
-            "properties": {"subscription_code": {"type": "string", "description": "e.g. TPJ-SIP-XXXXXXXXXXXX"}},
+            "properties": {"subscription_code": {"type": "string", "description": "e.g. DPJ-SIP-XXXXXXXXXXXX"}},
             "required": ["subscription_code"],
         },
     },
@@ -322,7 +482,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "subscription_code": {"type": "string"},
-                "order_number": {"type": "string", "description": "The order's order_number, e.g. TPJ-793859 — this is NOT a product SKU (e.g. TPJ-RIN-1010 is a SKU, not an order_number)."},
+                "order_number": {"type": "string", "description": "The order's order_number, e.g. DPJ-793859 — this is NOT a product SKU (e.g. DPJ-RIN-1010 is a SKU, not an order_number)."},
             },
             "required": ["subscription_code", "order_number"],
         },
@@ -441,7 +601,9 @@ ADMIN_TOOLS = [
         "name": "admin_find_orders",
         "description": (
             "Search orders across ALL customers, filtered by status, customer email, and/or date "
-            "range. Use for 'show me cancelled orders this week', 'what has this customer ordered'."
+            "range. Use for 'show me cancelled orders this week', 'what has this customer ordered'. "
+            "For any relative time phrase ('this month', 'this week', 'recently'), pass `period` "
+            "and leave the dates out — do NOT compute a date range yourself."
         ),
         "input_schema": {
             "type": "object",
@@ -451,8 +613,38 @@ ADMIN_TOOLS = [
                     "enum": ["PLACED", "CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED", "RETURNED"],
                 },
                 "customer_email": {"type": "string"},
+                "period": {"type": "string", "description": _PERIOD_DESC},
                 "start_date": {"type": "string", "description": "YYYY-MM-DD"},
                 "end_date": {"type": "string", "description": "YYYY-MM-DD"},
+                "limit": {"type": "integer"},
+            },
+        },
+    },
+    {
+        "name": "admin_order_invoice",
+        "description": (
+            "The full GST tax invoice for ANY customer's order — the metal / making / stone / GST "
+            "breakdown. Use when a staff member asks what an order was billed as, or why a price is "
+            "what it is. The result's 'invoice_markdown' is already formatted: output it verbatim, "
+            "don't re-total it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"order_number": {"type": "string"}},
+            "required": ["order_number"],
+        },
+    },
+    {
+        "name": "admin_list_design_requests",
+        "description": (
+            "The queue of custom design briefs customers have submitted, newest first. Use for 'what "
+            "custom requests have come in', 'anything waiting on a quote'. Filter by status to see "
+            "just the unreviewed ones."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["NEW", "REVIEWED", "QUOTED", "CLOSED"]},
                 "limit": {"type": "integer"},
             },
         },
@@ -461,8 +653,8 @@ ADMIN_TOOLS = [
         "name": "admin_order_detail",
         "description": (
             "Full detail for one order by order_number, including which customer it belongs to, "
-            "its line items, and its complete status history. order_number looks like TPJ-123456 "
-            "or TPJ-H00123 — it is NOT a product SKU (e.g. TPJ-RIN-1010 is a SKU)."
+            "its line items, and its complete status history. order_number looks like DPJ-123456 "
+            "or DPJ-H00123 — it is NOT a product SKU (e.g. DPJ-RIN-1010 is a SKU)."
         ),
         "input_schema": {
             "type": "object",
@@ -530,7 +722,7 @@ ADMIN_TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "order_number": {"type": "string", "description": "e.g. TPJ-123456. NOT a product SKU."},
+                "order_number": {"type": "string", "description": "e.g. DPJ-123456. NOT a product SKU."},
                 "reason_code": {
                     "type": "string",
                     "description": (
@@ -648,7 +840,7 @@ ADMIN_TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "order_number": {"type": "string", "description": "e.g. TPJ-123456. NOT a product SKU."},
+                "order_number": {"type": "string", "description": "e.g. DPJ-123456. NOT a product SKU."},
                 "reason_code": {
                     "type": "string",
                     "description": (
@@ -699,7 +891,7 @@ ADMIN_TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "sku": {"type": "string", "description": "Product SKU, e.g. TPJ-RIN-1010."},
+                "sku": {"type": "string", "description": "Product SKU, e.g. DPJ-RIN-1010."},
                 "new_quantity": {
                     "type": "integer",
                     "description": "The absolute quantity to set, NOT a delta to add or subtract.",

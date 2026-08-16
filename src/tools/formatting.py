@@ -33,3 +33,29 @@ def format_inr(cents: int) -> str:
 
     result = f"₹{formatted}.{paise:02d}"
     return f"-{result}" if negative else result
+
+
+def format_address(addr: dict | None) -> str | None:
+    """Format a shipping-address dict as the two-line block used on invoices and
+    order confirmations.
+
+    Same reasoning as format_inr: address layout is a deterministic function of
+    the fields, so the model is never asked to assemble one. It has no way to
+    silently drop a PIN code or put the state in the wrong place if it is only
+    ever repeating a string.
+
+    Tolerates the older seeded shape (line1/city/postal_code/country with no
+    recipient or phone) — historical orders genuinely lack those fields, and
+    omitting a line is honest where inventing a recipient name would not be.
+    """
+    if not addr:
+        return None
+
+    who = " · ".join(p for p in (addr.get("recipient_name"), addr.get("phone")) if p)
+    street = ", ".join(p for p in (addr.get("line1"), addr.get("line2")) if p)
+    # "Bengaluru, KA 560025" — city and state comma-separated, PIN space-separated,
+    # which is how Indian addresses are actually written.
+    city_bits = ", ".join(p for p in (addr.get("city"), addr.get("state")) if p)
+    locality = " ".join(p for p in (city_bits, addr.get("postal_code")) if p)
+
+    return "\n".join(line for line in (who, street, locality) if line) or None

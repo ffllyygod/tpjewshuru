@@ -1,4 +1,4 @@
--- TP Jewellers chatbot schema
+-- DP Jewellers chatbot schema
 -- Target: PostgreSQL 16+ with the pgvector extension.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto; -- gen_random_uuid()
@@ -34,6 +34,32 @@ CREATE TABLE customers (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Saved delivery addresses. Separate from orders.shipping_address on purpose:
+-- this is the customer's reusable address book, that is an immutable snapshot of
+-- where one particular parcel was sent. Editing "Home" must never rewrite where
+-- last year's order actually went.
+CREATE TABLE customer_addresses (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  customer_id    UUID NOT NULL REFERENCES customers(id),
+  label          TEXT,                  -- 'Home', 'Office' — customer's own word
+  recipient_name TEXT NOT NULL,         -- gifts go to someone other than the buyer
+  phone          TEXT NOT NULL,         -- couriers need one; normalised to 10 digits
+  line1          TEXT NOT NULL,
+  line2          TEXT,
+  city           TEXT NOT NULL,
+  state          TEXT NOT NULL,
+  postal_code    TEXT NOT NULL,         -- Indian PIN, 6 digits, validated in the tool
+  country        TEXT NOT NULL DEFAULT 'IN',
+  is_default     BOOLEAN NOT NULL DEFAULT false,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX customer_addresses_customer_id_idx ON customer_addresses(customer_id);
+-- "The default address" is a fact the database enforces, not a convention every
+-- write path has to remember. Two defaults is a state that simply can't exist.
+CREATE UNIQUE INDEX customer_addresses_one_default_idx
+  ON customer_addresses(customer_id) WHERE is_default;
+
 -- ============================================================
 -- Products
 -- ============================================================
@@ -60,16 +86,38 @@ CREATE TABLE products (
   -- engraved pieces cannot be returned unless defective; without this column the
   -- assistant would happily accept a return that its own quoted policy forbids.
   returnable           BOOLEAN NOT NULL DEFAULT true,
+  -- ---- Invoicing attributes -------------------------------------------------
+  -- What a real jewellery bill itemises. price_cents remains the full amount
+  -- payable (GST-inclusive); these let src/tools/billing.py decompose it into
+  -- metal / making / stone / GST lines that sum back to exactly price_cents.
+  --
+  -- All nullable for the same reason as cost_price_cents above: an invoice that
+  -- says "weight not on record" is honest, one that invents 6.2 g is not. The
+  -- decomposition degrades line by line rather than refusing or guessing.
+  net_weight_grams      NUMERIC(8,3),   -- metal only, excludes stone weight
+  purity_karat          SMALLINT,       -- 24 | 22 | 18 | 14; NULL for silver/platinum
+  making_charge_percent NUMERIC(5,2),   -- % of metal value
+  stone_value_cents     BIGINT,         -- pre-tax stone value; 0 when stone = 'none'
+  -- ---- Consultative attributes ----------------------------------------------
+  -- An array because a solitaire is genuinely both an engagement piece and an
+  -- anniversary one; forcing a single value would make "something for our
+  -- anniversary" miss half the catalogue.
+  occasion              TEXT[],         -- wedding|engagement|anniversary|birthday|festive|daily|gifting
+  style                 TEXT,           -- classic|contemporary|minimal|statement|traditional
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Occasion is an overlap (&&) filter, which needs GIN; style is plain equality.
+CREATE INDEX products_occasion_idx ON products USING GIN (occasion);
+CREATE INDEX products_style_idx ON products(style);
 
 -- ============================================================
 -- Orders
 -- ============================================================
 CREATE TABLE orders (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  order_number        TEXT NOT NULL UNIQUE,  -- human-facing, e.g. "TPJ-10234"
+  order_number        TEXT NOT NULL UNIQUE,  -- human-facing, e.g. "DPJ-10234"
   customer_id         UUID NOT NULL REFERENCES customers(id),
   status              order_status NOT NULL DEFAULT 'PLACED',
   placed_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -83,6 +131,15 @@ CREATE TABLE orders (
   -- The constraint is what stops that class of bug coming back.
   payment_status      TEXT NOT NULL DEFAULT 'PAID'
                       CHECK (payment_status IN ('PAID', 'REFUNDED', 'PENDING', 'REFUND_PENDING')),
+  -- How it was paid, once it was. place_order now creates orders as PENDING and
+  -- src/tools/purchase_tools.py:confirm_payment fills these in — the customer
+  -- sees a bill before money is treated as taken, instead of the order being
+  -- born 'PAID' with no payment step having happened at all.
+  -- Nullable throughout: seeded historical orders are PAID with no recorded
+  -- method, and inventing one would put fiction in an audit trail.
+  payment_method      TEXT CHECK (payment_method IN ('UPI', 'CARD', 'NETBANKING', 'COD')),
+  payment_reference   TEXT,
+  paid_at             TIMESTAMPTZ,
   -- Set when this order was placed using coupon balance (src/tools/purchase_tools.py).
   -- discount_cents is tracked separately from total_amount_cents so the "real" catalog
   -- total stays visible/auditable alongside what the coupon actually covered.
@@ -319,7 +376,7 @@ CREATE TABLE outreach_drafts (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   customer_id     UUID NOT NULL REFERENCES customers(id),
   signal_type     TEXT NOT NULL,   -- 'purchase_anniversary' | 'coupon_expiring' | ...
-  -- Identifies the specific occurrence, e.g. 'purchase_anniversary:TPJ-123456'.
+  -- Identifies the specific occurrence, e.g. 'purchase_anniversary:DPJ-123456'.
   -- The UNIQUE below is what stops a nightly job re-drafting the same nudge
   -- every night for a month — application logic would eventually miss a path.
   signal_key      TEXT NOT NULL,
@@ -365,7 +422,7 @@ CREATE TABLE coupon_policy (
 -- are mutually referential — coupons.source_subscription_id / gold_sip_subscriptions.exit_coupon_id).
 CREATE TABLE coupons (
   id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  code                   TEXT NOT NULL UNIQUE,   -- e.g. "TPJ-CPN-xxxxxxxxxxxx"
+  code                   TEXT NOT NULL UNIQUE,   -- e.g. "DPJ-CPN-xxxxxxxxxxxx"
   customer_id            UUID NOT NULL REFERENCES customers(id),
   source_type            TEXT NOT NULL,          -- 'cancellation' | 'return' | 'gold_sip_cancellation' | 'goodwill'
   source_order_id        UUID REFERENCES orders(id),
@@ -426,7 +483,7 @@ CREATE TABLE gold_sip_plans (
 
 CREATE TABLE gold_sip_subscriptions (
   id                                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  code                                   TEXT NOT NULL UNIQUE,  -- e.g. "TPJ-SIP-xxxxxxxxxxxx", human-referenceable
+  code                                   TEXT NOT NULL UNIQUE,  -- e.g. "DPJ-SIP-xxxxxxxxxxxx", human-referenceable
   customer_id                           UUID NOT NULL REFERENCES customers(id),
   plan_id                               UUID NOT NULL REFERENCES gold_sip_plans(id),
   -- Snapshotted at start time so a later edit to gold_sip_plans doesn't
@@ -475,3 +532,46 @@ CREATE TABLE gold_sip_installments (
   paid_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (subscription_id, installment_number)
 );
+
+-- ============================================================
+-- Custom design requests
+-- ============================================================
+-- A customer who likes a piece but wants it different — other metal, other
+-- stone, a size that isn't stocked, an engraving — previously had nowhere to
+-- go but the catalogue. This captures the brief and an INDICATIVE range, then
+-- hands it to a human jeweller.
+--
+-- Deliberately terminal: there is no tool that turns a design request into an
+-- order or a payment. The estimate is not a quote, and the only reliable way to
+-- stop it being treated as one is for the capability not to exist.
+CREATE TABLE design_requests (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_number       TEXT NOT NULL UNIQUE,           -- human-facing, e.g. 'DR-4412'
+  customer_id          UUID NOT NULL REFERENCES customers(id),
+  -- Nullable: a customer may describe something from scratch with no reference
+  -- piece. Without one there is usually no basis for an estimate, and the tool
+  -- says so rather than inventing a number.
+  reference_product_id UUID REFERENCES products(id),
+  -- What they actually asked for: metal, purity_karat, stone, approx_weight_grams,
+  -- size, engraving_text, occasion, budget_min_cents/budget_max_cents, notes.
+  -- JSONB rather than 10 columns because this is a brief for a human to read,
+  -- not something any report groups by.
+  spec                 JSONB NOT NULL,
+  -- Snapshotted, like the Gold SIP terms above: a range quoted in August must
+  -- not silently re-price itself when the gold rate or the reference product's
+  -- price moves.
+  estimate_low_cents   BIGINT,
+  estimate_high_cents  BIGINT,
+  estimate_basis       TEXT,   -- what the range covers, and what it excludes
+  status               TEXT NOT NULL DEFAULT 'NEW'
+                       CHECK (status IN ('NEW', 'REVIEWED', 'QUOTED', 'CLOSED')),
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reviewed_by          UUID REFERENCES customers(id),
+  reviewed_at          TIMESTAMPTZ,
+  CHECK (estimate_high_cents IS NULL OR estimate_low_cents IS NULL
+         OR estimate_high_cents >= estimate_low_cents)
+);
+
+CREATE INDEX design_requests_customer_id_idx ON design_requests(customer_id);
+-- The staff queue is almost always "what's come in that nobody has looked at".
+CREATE INDEX design_requests_new_idx ON design_requests(created_at DESC) WHERE status = 'NEW';

@@ -6,7 +6,7 @@ paths. Most of what follows asserts that a write did NOT happen.
 
 Fixtures here are deliberately self-contained — each test creates its own
 customer/product/order rather than mutating seeded rows. The existing
-cancellation test does the opposite (it really cancels TPJ-10000), which is why
+cancellation test does the opposite (it really cancels DPJ-10000), which is why
 tests/conftest.py has to exist at all; not repeating that.
 """
 
@@ -16,13 +16,14 @@ import uuid
 
 import pytest
 
+from tests.conftest import give_default_address
 from src.db.connection import get_conn
 from src.tools import admin_tools
 
 
 def _admin_id() -> str:
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id FROM customers WHERE email = 'admin@tpjewellers.com'")
+        cur.execute("SELECT id FROM customers WHERE email = 'admin@dpjewellers.com'")
         return str(cur.fetchone()[0])
 
 
@@ -57,13 +58,14 @@ def customer() -> dict:
         )
         cid = str(cur.fetchone()[0])
         conn.commit()
+    give_default_address(cid)   # place_order won't ship to nowhere
     return {"id": cid, "email": f"write-test-{suffix}@example.invalid"}
 
 
 @pytest.fixture
 def order(customer) -> str:
     """A PLACED order for the throwaway customer. Returns its order_number."""
-    number = f"TPJ-T{uuid.uuid4().hex[:6].upper()}"
+    number = f"DPJ-T{uuid.uuid4().hex[:6].upper()}"
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -80,7 +82,7 @@ def order(customer) -> str:
 def product() -> dict:
     """A throwaway product with two sizes, so size-resolution has something
     genuinely ambiguous to refuse."""
-    sku = f"TPJ-TST-{uuid.uuid4().hex[:6].upper()}"
+    sku = f"DPJ-TST-{uuid.uuid4().hex[:6].upper()}"
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -253,7 +255,7 @@ def test_a_failed_apply_does_not_burn_the_confirmation(actor, conversation, orde
     argument would force the staff member through the whole flow again."""
     assert admin_tools.admin_cancel_order(actor, order, "a different reason entirely", conversation, REASON_CODE)["applied"] is False
     admin_tools.admin_preview_order_cancellation(actor, order, REASON, conversation, REASON_CODE)
-    assert admin_tools.admin_cancel_order(actor, "TPJ-NOSUCHORDER", REASON, conversation, REASON_CODE)["applied"] is False
+    assert admin_tools.admin_cancel_order(actor, "DPJ-NOSUCHORDER", REASON, conversation, REASON_CODE)["applied"] is False
 
     assert admin_tools.admin_cancel_order(actor, order, REASON, conversation, REASON_CODE)["applied"] is True
 
@@ -530,7 +532,7 @@ def test_unknown_size_lists_the_valid_ones(actor, conversation, product):
 def test_single_size_product_needs_no_size_argument(actor, conversation):
     """Unsized products carry one '_default' key — an internal convention the
     model shouldn't have to know."""
-    sku = f"TPJ-TST-{uuid.uuid4().hex[:6].upper()}"
+    sku = f"DPJ-TST-{uuid.uuid4().hex[:6].upper()}"
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -556,8 +558,8 @@ def test_no_op_adjustment_is_refused(actor, conversation, product):
 
 
 def test_unknown_targets_are_refused(actor, conversation):
-    assert admin_tools.admin_preview_order_cancellation(actor, "TPJ-000000", REASON, conversation, REASON_CODE)["error"] == "not_found"
-    assert admin_tools.admin_preview_stock_adjustment(actor, "TPJ-NOPE-9999", 1, REASON, conversation)["error"] == "not_found"
+    assert admin_tools.admin_preview_order_cancellation(actor, "DPJ-000000", REASON, conversation, REASON_CODE)["error"] == "not_found"
+    assert admin_tools.admin_preview_stock_adjustment(actor, "DPJ-NOPE-9999", 1, REASON, conversation)["error"] == "not_found"
     assert admin_tools.admin_preview_goodwill_coupon(
         actor, "nobody@nowhere.invalid", 100, REASON, conversation)["error"] == "not_found"
 
@@ -579,8 +581,8 @@ def _delivered_order(customer_id: str, days_ago: int = 3, returnable: bool = Tru
     import uuid as _uuid
     from datetime import datetime, timedelta, timezone
 
-    sku = f"TPJ-ADR-{_uuid.uuid4().hex[:6].upper()}"
-    number = f"TPJ-D{_uuid.uuid4().hex[:6].upper()}"
+    sku = f"DPJ-ADR-{_uuid.uuid4().hex[:6].upper()}"
+    number = f"DPJ-D{_uuid.uuid4().hex[:6].upper()}"
     delivered_at = datetime.now(timezone.utc) - timedelta(days=days_ago)
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -694,7 +696,7 @@ def test_admin_cancel_restores_stock(actor, conversation, customer):
     # Its own product rather than the shared fixture: place_order only treats a
     # product as sized when sizes_available is populated, and the shared fixture
     # deliberately leaves it null.
-    sku = f"TPJ-ACS-{_uuid.uuid4().hex[:6].upper()}"
+    sku = f"DPJ-ACS-{_uuid.uuid4().hex[:6].upper()}"
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """

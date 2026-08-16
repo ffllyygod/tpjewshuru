@@ -161,7 +161,7 @@ def test_bot_stats_never_returns_message_content():
         (lambda: admin_tools.admin_sales_summary(ACTOR, period="nonsense"), "bad_period"),
         (lambda: admin_tools.admin_sales_breakdown(ACTOR, dimension="nonsense", period="month"), "bad_dimension"),
         (lambda: admin_tools.admin_inventory_status(ACTOR, filter="nonsense"), "bad_filter"),
-        (lambda: admin_tools.admin_order_detail(ACTOR, "TPJ-DOES-NOT-EXIST"), "not_found"),
+        (lambda: admin_tools.admin_order_detail(ACTOR, "DPJ-DOES-NOT-EXIST"), "not_found"),
         (lambda: admin_tools.admin_customer_profile(ACTOR, "nobody@example.invalid"), "not_found"),
     ],
 )

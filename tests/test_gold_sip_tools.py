@@ -199,7 +199,7 @@ def test_place_order_rejects_both_coupon_and_gold_sip():
     customer_id = _any_customer_id()
     sku, size = _any_product_with_stock()
     order = purchase_tools.place_order(
-        customer_id, sku, quantity=1, size=size, coupon_code="TPJ-CPN-FAKE", gold_sip_code="TPJ-SIP-FAKE"
+        customer_id, sku, quantity=1, size=size, coupon_code="DPJ-CPN-FAKE", gold_sip_code="DPJ-SIP-FAKE"
     )
     assert order["placed"] is True  # order itself still succeeds
     assert "discount_error" in order

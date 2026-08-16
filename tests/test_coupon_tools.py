@@ -50,10 +50,10 @@ def _any_product_with_stock() -> tuple[str, str | None]:
     raise RuntimeError("no product with stock found in seed data")
 
 
-# TPJ-10004 is seeded as already CANCELLED (see scripts/seed_db.py) — use it
+# DPJ-10004 is seeded as already CANCELLED (see scripts/seed_db.py) — use it
 # directly rather than cancelling something ourselves, so these tests don't
-# collide with tests/test_tools.py's use of TPJ-10000.
-CANCELLED_ORDER = "TPJ-10004"
+# collide with tests/test_tools.py's use of DPJ-10000.
+CANCELLED_ORDER = "DPJ-10004"
 
 
 def test_settlement_options_for_cancelled_order():
@@ -71,8 +71,8 @@ def test_settlement_options_for_cancelled_order():
 
 
 def test_settlement_options_rejects_non_settleable_order():
-    # TPJ-10002 is seeded as SHIPPED — not cancelled or returned.
-    customer_id, order_number = _customer_and_order("TPJ-10002")
+    # DPJ-10002 is seeded as SHIPPED — not cancelled or returned.
+    customer_id, order_number = _customer_and_order("DPJ-10002")
     result = coupon_tools.offer_settlement_options(customer_id, order_number)
     assert result["error"] == "not_settleable"
 
@@ -120,9 +120,9 @@ def test_expired_coupon_rejected():
     # policy's expiry_days, so this bypasses it deliberately to exercise the
     # expiry check itself).
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT id FROM orders WHERE order_number = %s", ("TPJ-10001",))
+        cur.execute("SELECT id FROM orders WHERE order_number = %s", ("DPJ-10001",))
         other_order_id = cur.fetchone()["id"]
-        code = "TPJ-CPN-TESTEXPIRED"
+        code = "DPJ-CPN-TESTEXPIRED"
         cur.execute(
             """
             INSERT INTO coupons (code, customer_id, source_type, source_order_id,

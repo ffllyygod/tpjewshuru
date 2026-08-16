@@ -38,7 +38,10 @@ from psycopg.rows import dict_row
 from src.agent.system_prompt import prompt_for
 from src.agent.tool_schemas import ADMIN_TOOLS, TOOLS
 from src.db.connection import get_conn
-from src.tools import admin_tools, coupon_tools, outreach_tools, gold_sip_tools, knowledge_tools, market_tools, order_tools, product_tools, purchase_tools
+from src.tools import (
+    address_tools, admin_tools, billing, coupon_tools, design_tools, outreach_tools,
+    gold_sip_tools, knowledge_tools, market_tools, order_tools, product_tools, purchase_tools,
+)
 
 LLM_MODEL = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
@@ -116,6 +119,13 @@ _TOOL_IMPL = {
     "get_my_coupons": coupon_tools.get_my_coupons,
     "redeem_coupon": coupon_tools.redeem_coupon,
     "place_order": purchase_tools.place_order,
+    "confirm_payment": purchase_tools.confirm_payment,
+    "generate_invoice": billing.generate_invoice,
+    "get_my_addresses": address_tools.get_my_addresses,
+    "save_address": address_tools.save_address,
+    "estimate_custom_design": design_tools.estimate_custom_design,
+    "submit_design_request": design_tools.submit_design_request,
+    "get_my_design_requests": design_tools.get_my_design_requests,
     "list_gold_sip_plans": gold_sip_tools.list_gold_sip_plans,
     "start_gold_sip": gold_sip_tools.start_gold_sip,
     "pay_sip_installment": gold_sip_tools.pay_sip_installment,
@@ -139,6 +149,8 @@ _TOOL_IMPL = {
     "admin_dismiss_outreach": admin_tools.admin_dismiss_outreach,
     "admin_preview_order_return": admin_tools.admin_preview_order_return,
     "admin_return_order": admin_tools.admin_return_order,
+    "admin_order_invoice": billing.admin_order_invoice,
+    "admin_list_design_requests": design_tools.admin_list_design_requests,
     # Staff writes — each preview mints a confirmation the matching apply
     # consumes; see the WRITES section of src/tools/admin_tools.py.
     "admin_preview_order_cancellation": admin_tools.admin_preview_order_cancellation,
@@ -152,7 +164,9 @@ _NEEDS_CUSTOMER_ID = {
     "list_customer_orders", "get_order_status", "check_cancellation_eligibility", "cancel_order",
     "check_return_eligibility", "request_return", "set_marketing_preference",
     "offer_settlement_options", "issue_coupon", "request_cash_refund", "get_my_coupons",
-    "redeem_coupon", "place_order",
+    "redeem_coupon", "place_order", "confirm_payment", "generate_invoice",
+    "get_my_addresses", "save_address",
+    "submit_design_request", "get_my_design_requests",
     "start_gold_sip", "pay_sip_installment", "get_my_gold_sips", "cancel_gold_sip", "redeem_gold_sip",
 }
 _NEEDS_CONVERSATION_ID = {
@@ -191,7 +205,9 @@ _CUSTOMER_ONLY = {
     "list_customer_orders", "get_order_status", "check_cancellation_eligibility", "cancel_order",
     "check_return_eligibility", "request_return", "set_marketing_preference",
     "offer_settlement_options", "issue_coupon", "request_cash_refund", "get_my_coupons",
-    "redeem_coupon", "place_order",
+    "redeem_coupon", "place_order", "confirm_payment", "generate_invoice",
+    "get_my_addresses", "save_address",
+    "submit_design_request", "get_my_design_requests",
     "start_gold_sip", "pay_sip_installment", "get_my_gold_sips", "cancel_gold_sip", "redeem_gold_sip",
 }
 
@@ -305,7 +321,7 @@ def _should_rotate(exc: Exception) -> bool:
     return False
 
 
-def _call_model(messages: list[dict], is_admin: bool = False):
+def _call_model(messages: list[dict], is_admin: bool = False, is_first_turn: bool = False):
     """One model call, failing over across API keys.
 
     Tries the currently-active key first, then every other key in order.
@@ -316,7 +332,7 @@ def _call_model(messages: list[dict], is_admin: bool = False):
 
     payload = {
         "model": LLM_MODEL,
-        "messages": [{"role": "system", "content": prompt_for(is_admin)}] + messages,
+        "messages": [{"role": "system", "content": prompt_for(is_admin, is_first_turn)}] + messages,
         "tools": _tools_for(is_admin),
         "tool_choice": "auto",
     }
@@ -362,8 +378,13 @@ def run_turn(
 
     messages = _load_history(conversation_id)
 
+    # The user message just saved is the only one in history => this is the
+    # opening exchange. Computed here because it's a fact we hold and the model
+    # doesn't; asked to work out "am I at the start?" it would greet every turn.
+    is_first_turn = len(messages) <= 1
+
     for _ in range(MAX_TOOL_ITERATIONS):
-        response = _call_model(messages, is_admin=is_admin)
+        response = _call_model(messages, is_admin=is_admin, is_first_turn=is_first_turn)
         message = response.choices[0].message
 
         if not message.tool_calls:
