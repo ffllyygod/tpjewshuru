@@ -19,47 +19,80 @@ type Props = {
  */
 export default function ModeChooser({ name, onChoose }: Props) {
   return (
-    <div className="flex flex-1 items-center justify-center px-4">
-      <div className="w-full max-w-sm">
+    <div className="flex flex-1 items-center justify-center px-4 py-10">
+      <div className="w-full max-w-[26rem]">
         <div className="mb-8 text-center">
-          <p className="mb-2 text-xs tracking-[0.3em] text-[var(--color-gold)] uppercase">
+          <p className="mb-2 text-[10px] tracking-[0.28em] text-[var(--color-gold)] uppercase">
             DP Jewellers
           </p>
-          <h1 className="font-display text-3xl text-[var(--color-fg)]">
+          <h1 className="font-display text-[2rem] leading-tight tracking-tight">
             {name ? `Welcome, ${name.split(" ")[0]}` : "Welcome"}
           </h1>
-          <p className="mt-2 text-sm text-[var(--color-fg-muted)]">
+          <p className="mt-2.5 text-sm text-[var(--color-fg-muted)]">
             You have staff access. What are you here to do?
           </p>
         </div>
 
         <div className="flex flex-col gap-3">
-          <button
+          <Choice
             onClick={() => onChoose("admin")}
-            className="rounded-xl border border-[var(--color-gold)] bg-[var(--color-bg-elevated)] p-5 text-left transition hover:bg-[var(--color-gold)]/10"
-          >
-            <span className="block text-sm font-medium text-[var(--color-gold)]">
-              Staff console
-            </span>
-            <span className="mt-1 block text-xs text-[var(--color-fg-muted)]">
-              Sales and inventory reporting, customer and order lookups across the whole
-              business, and operational changes.
-            </span>
-          </button>
-
-          <button
+            title="Staff console"
+            body="Sales and inventory reporting, customer and order lookups across the whole business, and operational changes."
+            accent
+          />
+          <Choice
             onClick={() => onChoose("customer")}
-            className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-5 text-left transition hover:border-[var(--color-gold)]"
-          >
-            <span className="block text-sm font-medium text-[var(--color-fg)]">
-              Shop as myself
-            </span>
-            <span className="mt-1 block text-xs text-[var(--color-fg-muted)]">
-              Your own orders and purchases, exactly as any customer sees them.
-            </span>
-          </button>
+            title="Shop as myself"
+            body="Your own orders and purchases, exactly as any customer sees them."
+          />
         </div>
+
+        <p className="mt-5 text-center text-xs text-[var(--color-fg-subtle)]">
+          This choice lasts for the conversation — switching means starting a new one.
+        </p>
       </div>
     </div>
+  );
+}
+
+function Choice({
+  onClick,
+  title,
+  body,
+  accent = false,
+}: {
+  onClick: () => void;
+  title: string;
+  body: string;
+  accent?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={[
+        "group rounded-[18px] border bg-[var(--color-bg-elevated)] p-5 text-left transition",
+        "hover:-translate-y-0.5 hover:shadow-[var(--shadow-lift)]",
+        accent
+          ? "border-[var(--color-gold)]/50 hover:border-[var(--color-gold)]"
+          : "border-[var(--color-border)] hover:border-[var(--color-border-strong)]",
+      ].join(" ")}
+    >
+      <span className="flex items-center justify-between gap-3">
+        <span
+          className={`font-display text-base ${accent ? "text-[var(--color-gold)]" : "text-[var(--color-fg)]"}`}
+        >
+          {title}
+        </span>
+        <span
+          aria-hidden
+          className="text-[var(--color-fg-subtle)] transition group-hover:translate-x-0.5 group-hover:text-[var(--color-fg-muted)]"
+        >
+          →
+        </span>
+      </span>
+      <span className="mt-1.5 block text-xs leading-relaxed text-[var(--color-fg-muted)]">
+        {body}
+      </span>
+    </button>
   );
 }

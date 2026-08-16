@@ -47,7 +47,9 @@ export default function Home() {
         adopt(res);
       }
     } catch {
-      setError("Couldn't reach the API. Is it running on localhost:8000?");
+      // Customer-facing copy: a shopper has no idea what port 8000 is, and
+      // showing them our infrastructure is neither useful nor reassuring.
+      setError("We couldn't open the concierge just now. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -76,16 +78,39 @@ export default function Home() {
 
   if (loading) {
     return (
-      <div className="flex flex-1 items-center justify-center px-4">
-        <p className="text-sm text-[var(--color-fg-muted)]">Connecting…</p>
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4">
+        <span
+          aria-hidden
+          className="font-display grid h-12 w-12 place-items-center rounded-full border border-[var(--color-gold)]/40 bg-[var(--color-gold-wash)] text-[var(--color-gold)]"
+        >
+          DP
+        </span>
+        <p className="text-sm text-[var(--color-fg-muted)]" role="status">
+          Opening the counter…
+        </p>
       </div>
     );
   }
 
+  // A dead end with no way out was the old behaviour here: the message appeared
+  // and the only recovery was reloading the page.
   if (error) {
     return (
       <div className="flex flex-1 items-center justify-center px-4">
-        <p className="text-sm text-red-400">{error}</p>
+        <div className="w-full max-w-sm rounded-[18px] border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-6 text-center shadow-[var(--shadow-lift)]">
+          <p role="alert" className="text-sm text-[var(--color-danger)]">
+            {error}
+          </p>
+          <button
+            onClick={() => {
+              setError(null);
+              void startWithCurrentSession();
+            }}
+            className="mt-4 w-full rounded-xl bg-[var(--color-gold)] py-2.5 text-sm font-medium text-[var(--color-user-bubble-fg)] transition hover:bg-[var(--color-gold-soft)]"
+          >
+            Try again
+          </button>
+        </div>
       </div>
     );
   }

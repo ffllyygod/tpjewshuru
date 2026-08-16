@@ -1,16 +1,62 @@
 @import "tailwindcss";
 
+/* ---------------------------------------------------------------------------
+   Design tokens.
+
+   Two palettes, because the previous build was dark-only and a jewellery site
+   opened on a phone in daylight is unreadable in charcoal. Every colour is
+   defined on bare :root first and only *redefined* under the dark media query,
+   so nothing has its sole definition inside a conditional block.
+
+   The gold is the brand and it is used sparingly — accents, the send action,
+   emphasis inside a reply. Filling large areas with it makes the whole thing
+   look like costume jewellery, which is the opposite of the point.
+--------------------------------------------------------------------------- */
 :root {
-  --color-bg: #0f0d0a;
-  --color-bg-elevated: #17140f;
-  --color-fg: #f2ede3;
-  --color-fg-muted: #a89f8f;
-  --color-gold: #c9a15a;
-  --color-gold-soft: #e2c98a;
-  --color-border: #2a2519;
-  --color-user-bubble: #c9a15a;
-  --color-user-bubble-fg: #14110a;
-  --color-bot-bubble: #1e1a12;
+  --color-bg: #faf8f5;
+  --color-bg-elevated: #ffffff;
+  --color-surface: #f4f0ea;
+  --color-fg: #1c1814;
+  --color-fg-muted: #6b6154;
+  --color-fg-subtle: #9a9184;
+  --color-gold: #a67c34;
+  --color-gold-soft: #8a6528;
+  --color-gold-wash: #a67c341a;
+  --color-border: #e4ddd2;
+  --color-border-strong: #d2c8b8;
+  --color-user-bubble: #1c1814;
+  --color-user-bubble-fg: #faf8f5;
+  --color-danger: #a3341f;
+  --color-danger-wash: #a3341f14;
+
+  --shadow-soft: 0 1px 2px rgb(28 24 20 / 0.04), 0 8px 24px -12px rgb(28 24 20 / 0.16);
+  --shadow-lift: 0 2px 4px rgb(28 24 20 / 0.06), 0 16px 40px -16px rgb(28 24 20 / 0.24);
+
+  --radius-card: 14px;
+  --composer-height: 0px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #100e0b;
+    --color-bg-elevated: #191510;
+    --color-surface: #1e1a13;
+    --color-fg: #f2ede3;
+    --color-fg-muted: #a89f8f;
+    --color-fg-subtle: #7d7466;
+    --color-gold: #d3ae68;
+    --color-gold-soft: #e8d3a0;
+    --color-gold-wash: #d3ae681f;
+    --color-border: #2c2619;
+    --color-border-strong: #40382a;
+    --color-user-bubble: #d3ae68;
+    --color-user-bubble-fg: #17130c;
+    --color-danger: #f0836c;
+    --color-danger-wash: #f0836c14;
+
+    --shadow-soft: 0 1px 2px rgb(0 0 0 / 0.3), 0 8px 24px -12px rgb(0 0 0 / 0.6);
+    --shadow-lift: 0 2px 4px rgb(0 0 0 / 0.4), 0 16px 40px -16px rgb(0 0 0 / 0.7);
+  }
 }
 
 @theme inline {
@@ -18,16 +64,31 @@
   --font-body: var(--font-body);
 }
 
-html, body {
+html,
+body {
   height: 100%;
 }
 
 body {
   font-family: var(--font-body), ui-sans-serif, system-ui, sans-serif;
+  /* Lining, tabular figures everywhere. This app's whole job is showing rupee
+     amounts in tables that have to line up; proportional digits make an invoice
+     column visibly ragged. */
+  font-variant-numeric: tabular-nums lining-nums;
+  -webkit-font-smoothing: antialiased;
 }
 
 .font-display {
-  font-family: var(--font-display), serif;
+  font-family: var(--font-display), Georgia, serif;
+}
+
+/* A visible, consistent focus ring. The previous build removed outlines with
+   `outline-none` and replaced them with a border colour change, which is
+   invisible to keyboard users on the buttons that had no border. */
+:where(a, button, input, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-gold);
+  outline-offset: 2px;
+  border-radius: 6px;
 }
 
 @keyframes typing-dot {
@@ -39,12 +100,36 @@ body {
   animation: typing-dot 1.2s infinite ease-in-out;
 }
 
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.rise {
+  animation: rise 0.22s ease-out both;
+}
+
+/* Anyone who has asked their OS to stop animating things means it. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 ::-webkit-scrollbar {
-  width: 8px;
+  width: 10px;
+  height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--color-border);
-  border-radius: 8px;
+  background: var(--color-border-strong);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
