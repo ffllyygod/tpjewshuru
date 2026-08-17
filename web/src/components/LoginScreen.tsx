@@ -196,6 +196,18 @@ export default function LoginScreen({ onLoggedIn, onBrowseAnonymously }: Props) 
             </form>
           )}
         </div>
+
+        <p className="mt-6 text-center text-[11px] tracking-wider text-[var(--color-fg-subtle)] uppercase">
+          Built by{" "}
+          <a
+            href="https://ffllyy.vercel.app"
+            target="_blank"
+            rel="noreferrer noopener"
+            className="text-[var(--color-fg-muted)] transition hover:text-[var(--color-gold)]"
+          >
+            fly
+          </a>
+        </p>
       </div>
     </div>
   );
